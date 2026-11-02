@@ -395,8 +395,16 @@ await step('a running turn is marked in the tree, and its end raises a notificat
     await reveal('gamma')
     await tid('ext-input').fill('ping')
     await tid('ext-send').click()
-    await page.waitForFunction(() => [...document.querySelectorAll('[role="treeitem"]')].some(el => /▶ gamma/.test(el.textContent ?? '')), null, { timeout: 15000 })
-    await page.waitForFunction(() => ![...document.querySelectorAll('[role="treeitem"]')].some(el => /▶ gamma/.test(el.textContent ?? '')), null, { timeout: 30000 })
+    const gammaRow = () => {
+      const row = [...document.querySelectorAll('[role="treeitem"]')].find(el => /gamma/.test(el.textContent ?? ''))
+      return row === undefined ? null : { spinning: row.querySelector('svg[data-state="ongoing"]') !== null, marker: /▶/.test(row.textContent ?? ''), mark: row.querySelector('[data-engine]') !== null }
+    }
+    await page.waitForFunction(`(${gammaRow})()?.spinning === true`, null, { timeout: 15000 })
+    const during = await page.evaluate(gammaRow)
+    assert(!during.marker, 'a running row should not carry a marker in its title')
+    assert(!during.mark, 'a running row should show the status in the mark cell, as a DSH row does')
+    await page.waitForFunction(`(${gammaRow})()?.spinning === false`, null, { timeout: 30000 })
+    assert((await page.evaluate(gammaRow)).mark, 'the engine mark should return when the turn ends')
     const notes = await page.evaluate(() => window.__notes)
     assert(notes.some(([title]) => /gamma/.test(title)), `no notification for the finished turn: ${JSON.stringify(notes)}`)
   } finally { rmSync(MODE, { force: true }) }
@@ -494,6 +502,90 @@ await step('new session: browse folders, clone a repository into one, and the se
     assert(readFileSync('/tmp/ee-pick/copy/a.txt', 'utf8') === 'hi\n', 'the clone is missing its file')
     await tid('ext-clone-url').count()
   } finally { rmSync('/tmp/ee-pick', { recursive: true, force: true }) }
+})
+
+await step('send keys match the DSH composer: Enter sends, Shift+Enter breaks the line, a composition Enter does neither', async () => {
+  await load()
+  writeFileSync(MODE, 'record')
+  try {
+    rmSync(FAKE_LOG, { force: true })
+    await reveal('gamma')
+    await tid('ext-input').click()
+    await page.keyboard.type('first')
+    await page.keyboard.press('Shift+Enter')
+    await page.keyboard.type('second')
+    assert(await tid('ext-input').inputValue() === 'first\nsecond', 'Shift+Enter should add a line and not send')
+    await tid('ext-input').evaluate((input) => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })) })
+    await page.waitForTimeout(300)
+    assert(await tid('ext-input').inputValue() === 'first\nsecond', 'the Enter that ends a composition must not send')
+    await tid('ext-input').fill('entersent')
+    await page.keyboard.press('Enter')
+    await page.waitForFunction(() => document.querySelector('[data-testid="ext-input"]')?.value === '', undefined, { timeout: 10000 })
+    assert(await tid('ext-pending').filter({ hasText: 'entersent' }).count() > 0 || await page.getByText('entersent').count() > 0, 'plain Enter should send the message')
+  } finally { rmSync(MODE, { force: true }) }
+})
+
+await step('the session header drags the window on macOS, and its controls stay clickable', async () => {
+  const regions = await page.evaluate(() => {
+    document.documentElement.setAttribute('data-platform', 'darwin')
+    const region = element => getComputedStyle(element).getPropertyValue('-webkit-app-region')
+    const topbar = document.querySelector('[data-testid="ext-topbar"]')
+    return { topbar: region(topbar), control: region(topbar.querySelector('button')) }
+  })
+  assert(regions.topbar === 'drag', `header region is ${regions.topbar}`)
+  assert(regions.control === 'no-drag', `control region is ${regions.control}`)
+})
+
+await step('the permission control sits by the attach button; its choice reaches Claude; full access needs the acknowledged risk dialog', async () => {
+  writeFileSync(MODE, 'record')
+  const pick = async (name) => {
+    await tid('ext-permission-trigger').click()
+    await page.locator('[role="menu"] button, [role="menu"] [role="menuitem"]').filter({ hasText: name }).first().click()
+  }
+  const sentWith = async (mode, word) => {
+    await page.waitForTimeout(500)
+    rmSync(FAKE_LOG, { force: true })
+    await load()
+    await reveal('gamma')
+    await tid('ext-input').fill(word)
+    await tid('ext-send').click()
+    const found = () => fakeLog().some(call => call.args.join(' ').includes(`--permission-mode ${mode}`))
+    const deadline = Date.now() + 30000
+    while (!found() && Date.now() < deadline) await page.waitForTimeout(300)
+    assert(found(), `no call ran with ${mode}: ${fakeLog().map(call => call.args.join(' ').slice(0, 160)).join(' | ')}`)
+  }
+  try {
+    await load()
+    await reveal('gamma')
+    const order = await page.evaluate(() => {
+      const attach = document.querySelector('[data-testid="ext-attach"]').getBoundingClientRect()
+      const trigger = document.querySelector('[data-testid="ext-permission-trigger"]').getBoundingClientRect()
+      const model = document.querySelector('[data-testid="ext-model"]').getBoundingClientRect()
+      return attach.right <= trigger.left && trigger.right <= model.left
+    })
+    assert(order, 'the control should sit between the attach button and the model')
+    await tid('ext-composer').screenshot({ path: `${EVIDENCE}permission-default.png` }).catch(() => {})
+    await pick(/^(Read Only|仅可查看)/)
+    await tid('ext-composer').screenshot({ path: `${EVIDENCE}permission-readonly.png` }).catch(() => {})
+    await sentWith('plan', 'permread')
+    await pick(/^(Full access|完全权限)/)
+    const dialog = page.locator('[role="dialog"], [role="alertdialog"]').filter({ hasText: /Full access|完全权限/ }).first()
+    await dialog.waitFor({ timeout: 5000 })
+    await dialog.getByRole('button', { name: /^(Cancel|取消)$/ }).click()
+    assert(await tid('ext-permission-trigger').getAttribute('data-value') === 'readOnly', 'cancelling should keep the previous choice')
+    await pick(/^(Full access|完全权限)/)
+    const enable = dialog.getByRole('button', { name: /^(Enable Full access|启用完全权限)$/ })
+    assert(await enable.isDisabled(), 'enabling must wait for the acknowledgement')
+    await page.screenshot({ path: `${EVIDENCE}permission-dialog.png` }).catch(() => {})
+    await dialog.getByRole('checkbox').check()
+    await enable.click()
+    await sentWith('bypassPermissions', 'permfull')
+    assert(fakeLog().some(call => /--thinking\S* \S*/.test(call.args.join(' ')) && call.args.join(' ').includes('summarized')), `thinking summaries were not requested: ${fakeLog().map(call => call.args.join(' ').slice(0, 300)).join(' | ')}`)
+    await pick(/^(Default permission|默认权限)/)
+    await page.waitForTimeout(500)
+    const refused = await page.evaluate(async () => (await fetch('/api/agent-bridge/send', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'x', permission: 'bypassPermissions' }) })).status)
+    assert(refused === 400, `an unknown permission value got ${refused}`)
+  } finally { rmSync(MODE, { force: true }) }
 })
 
 await step('no uncaught page errors', async () => { assert(pageErrors.length === 0, pageErrors.join(' | ')) })

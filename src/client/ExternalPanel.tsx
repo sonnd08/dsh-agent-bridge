@@ -2,7 +2,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button, Menu, MenuItemButton, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { CODEX_ID_PREFIX, DRAFT_PATH, NEW_CODEX_SESSION_ID, type AttachmentWire, type PermissionWire } from '../protocol.ts'
+import { DRAFT_PATH, engineOfSession, type AttachmentWire, type EngineName, type PermissionWire } from '../protocol.ts'
 import { isDraft, type TranscriptController, type TranscriptState } from './transcript.ts'
 import type { SessionsSnapshot } from './sessions.ts'
 import { IconAlarm, IconArchive, IconBranch, IconCopy, IconEdit, IconMore, IconSearch, IconTrash } from './icons.tsx'
@@ -66,8 +66,10 @@ const SEND_GLYPH = 'M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.432
 
 const compact = (n: number): string => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
 
-function PermissionCard({ permission, controller, alwaysAllow, codex, t }: {
-  permission: PermissionWire; controller: TranscriptController; alwaysAllow: (tool: string) => Promise<void>; codex: boolean; t: T
+const COMPOSER_PLACEHOLDER = { claude: 'composer.placeholder', codex: 'composer.placeholderCodex', pi: 'composer.placeholderPi' } as const
+
+function PermissionCard({ permission, controller, alwaysAllow, engine, t }: {
+  permission: PermissionWire; controller: TranscriptController; alwaysAllow: (tool: string) => Promise<void>; engine: EngineName; t: T
 }) {
   const [picked, setPicked] = useState<Record<string, string[]>>({})
   const pick = (question: string, label: string, multi: boolean): void => {
@@ -116,13 +118,15 @@ function PermissionCard({ permission, controller, alwaysAllow, codex, t }: {
         ? <pre className={css.input}>{permission.input}</pre>
         : <pre className={css.input} data-testid="ext-plan">{permission.plan}</pre>}
       <Button variant="primary" size="sm" data-testid="ext-allow" onClick={() => { void controller.answer(permission.requestId, 'allow') }}>{t('card.allow')}</Button>
-      <Button
-        variant="outline" size="sm" data-testid="ext-always"
-        onClick={() => {
-          if (codex) void controller.answer(permission.requestId, 'allow', undefined, true)
-          else void alwaysAllow(permission.tool).then(() => controller.answer(permission.requestId, 'allow'))
-        }}
-      >{codex ? t('card.session') : t('card.always', { tool: permission.tool })}</Button>
+      {engine !== 'pi' && (
+        <Button
+          variant="outline" size="sm" data-testid="ext-always"
+          onClick={() => {
+            if (engine === 'codex') void controller.answer(permission.requestId, 'allow', undefined, true)
+            else void alwaysAllow(permission.tool).then(() => controller.answer(permission.requestId, 'allow'))
+          }}
+        >{engine === 'codex' ? t('card.session') : t('card.always', { tool: permission.tool })}</Button>
+      )}
       <Button variant="ghost" size="sm" data-testid="ext-deny" onClick={() => { void controller.answer(permission.requestId, 'deny') }}>{t('card.deny')}</Button>
     </div>
   )
@@ -159,9 +163,8 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
     return () => { observer.disconnect() }
   }, [])
   const draft = isDraft(transcript.sessionId)
-  const codex = transcript.sessionId?.startsWith(CODEX_ID_PREFIX) === true
   const shownCwd = cwd ?? getDefaultCwd()
-  const engine = codex || transcript.sessionId === NEW_CODEX_SESSION_ID ? 'codex' : 'claude'
+  const engine = engineOfSession(transcript.sessionId)
   const { info } = useInfo(engine, draft ? shownCwd : selected?.cwd)
   const [choice, setChoice] = useChoice(engine)
   const [attachments, setAttachments] = useState<AttachmentWire[]>([])
@@ -210,6 +213,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
     setAttachments([])
     void controller.send(message, draft ? shownCwd : selected?.cwd ?? shownCwd, {
       ...choice.model === '' ? {} : { model: choice.model }, ...choice.effort === '' ? {} : { effort: choice.effort },
+      ...choice.permission === undefined || choice.permission === '' ? {} : { permission: choice.permission },
       ...sent.length === 0 ? {} : { attachments: sent },
     })
   }
@@ -218,10 +222,10 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
   const managed = managedId !== undefined
   return (
     <div className={css.shell}>
-      <header className={css.topbar} data-testid="ext-topbar">
+      <header className={css.topbar} data-testid="ext-topbar" data-window-drag="">
         <div className={css.titleRow}>
           <div className={css.titleCluster}>
-            <h2 className={css.title} data-testid="ext-title" title={draft ? undefined : selected?.cwd}>{selected?.title.replace(/^▶ /, '') ?? t('panel.empty')}</h2>
+            <h2 className={css.title} data-testid="ext-title" title={draft ? undefined : selected?.cwd}>{selected?.title ?? t('panel.empty')}</h2>
             {draft
               ? (
                 <label className={css.meta}>
@@ -261,7 +265,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
                 )}
               >
                 <div data-testid="ext-rename">
-                  <MenuItemButton icon={<IconEdit size={16} />} onSelect={() => { setMenuOpen(false); setRenaming(selected?.title.replace(/^▶ /, '') ?? '') }}>{t('manage.rename')}</MenuItemButton>
+                  <MenuItemButton icon={<IconEdit size={16} />} onSelect={() => { setMenuOpen(false); setRenaming(selected?.title ?? '') }}>{t('manage.rename')}</MenuItemButton>
                 </div>
                 <div data-testid="ext-fork">
                   <MenuItemButton icon={<IconBranch size={16} />} disabled={transcript.running} onSelect={() => { setMenuOpen(false); void controller.manage('fork', `${selected?.title ?? ''} (fork)`) }}>{t('manage.fork')}</MenuItemButton>
@@ -360,7 +364,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
             )}
           </ol>
           {transcript.permissions.map(permission => (
-            <PermissionCard key={permission.requestId} permission={permission} controller={controller} alwaysAllow={alwaysAllow} codex={codex} t={t} />
+            <PermissionCard key={permission.requestId} permission={permission} controller={controller} alwaysAllow={alwaysAllow} engine={engine} t={t} />
           ))}
           {transcript.error !== undefined && <p className={css.error} data-testid="ext-error" role="alert">{transcript.error}</p>}
         </div>
@@ -380,10 +384,13 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
             <div className={css.composerCard}>
               <AttachmentChips attachments={attachments} onRemove={(index) => { setAttachments(current => current.filter((_, position) => position !== index)) }} t={t} />
               <textarea
-                className={css.text} data-testid="ext-input" rows={2} value={text} placeholder={codex ? t('composer.placeholderCodex') : t('composer.placeholder')}
+                className={css.text} data-testid="ext-input" rows={2} value={text} placeholder={t(COMPOSER_PLACEHOLDER[engine])}
                 onChange={(event) => { typedBeforeDraft.current = true; setText(event.target.value) }}
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send() }
+                  // The same keys as the DSH composer. The Enter that closes an input-method composition picks a word, not sends; 229 is what some engines report for it.
+                  if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
+                  event.preventDefault()
+                  send()
                 }}
                 onPaste={(event) => {
                   const files = Array.from(event.clipboardData.files)
@@ -398,7 +405,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
               <div className={css.toolbar}>
                 <div className={css.tools}>
                   <ComposerBar
-                    part="leading" info={info} choice={choice} onChoice={setChoice} onAttach={attach}
+                    part="leading" engine={engine} info={info} choice={choice} onChoice={setChoice} onAttach={attach}
                     onDictated={(spoken) => { setText(current => current === '' ? spoken : `${current} ${spoken}`) }} t={t}
                   />
                   {managed && (
@@ -406,14 +413,14 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
                       <IconAlarm size={14} />{t('schedule.open')}
                     </button>
                   )}
-                  {managed && transcript.goal === undefined && (
+                  {managed && engine !== 'pi' && transcript.goal === undefined && (
                     <button type="button" className={css.chip} data-testid="ext-goal-toggle" aria-pressed={goalOpen} onClick={() => { setGoalOpen(open => !open) }}>
                       {t('goal.title')}
                     </button>
                   )}
                 </div>
                 <div className={css.trailing}>
-                  <ComposerBar part="trailing" info={info} choice={choice} onChoice={setChoice} onAttach={attach} onDictated={() => {}} t={t} />
+                  <ComposerBar part="trailing" engine={engine} info={info} choice={choice} onChoice={setChoice} onAttach={attach} onDictated={() => {}} t={t} />
                   {transcript.running
                     ? (
                       <button type="button" className={css.primary} data-testid="ext-stop" aria-label={t('composer.stop')} title={t('composer.stop')} onClick={() => { void controller.interrupt() }}>

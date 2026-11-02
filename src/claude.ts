@@ -77,7 +77,8 @@ function toBlocks(content: unknown): BlockWire[] {
         blocks.push({ type: 'text', text: String(part['text'] ?? '') })
         break
       case 'thinking':
-        blocks.push({ type: 'thinking', text: String(part['thinking'] ?? '') })
+        // Without a summary the block holds only a signature, so there is nothing to show.
+        if (typeof part['thinking'] === 'string' && part['thinking'] !== '') blocks.push({ type: 'thinking', text: part['thinking'] })
         break
       case 'tool_use':
       {
@@ -116,10 +117,23 @@ function toBlocks(content: unknown): BlockWire[] {
  * @returns user and assistant messages in file order.
  */
 export async function readClaudeMessages(sessionId: string): Promise<MessageWire[]> {
-  const messages = await getSessionMessages(sessionId)
-  return messages.flatMap((entry): MessageWire[] => {
+  return toTranscript(await getSessionMessages(sessionId))
+}
+
+/** A whole message that is one background-task notification, which Claude Code writes as a user message to wake the model. */
+const TASK_NOTIFICATION = /^\s*<task-notification>[\s\S]*<\/task-notification>\s*$/
+
+/**
+ * Keep what the people in a session said and did. The SDK drops the entry's `origin` field, so a task notification is
+ * recognized by its text; a message that adds words of the user's own to a notification stays.
+ * @param entries - session entries as the SDK returns them.
+ * @returns the transcript messages.
+ */
+export function toTranscript(entries: readonly { type: string; uuid: string; message: unknown }[]): MessageWire[] {
+  return entries.flatMap((entry): MessageWire[] => {
     if (entry.type !== 'user' && entry.type !== 'assistant') return []
     const body = entry.message as { content?: unknown }
+    if (entry.type === 'user' && typeof body.content === 'string' && TASK_NOTIFICATION.test(body.content)) return []
     return [{ id: entry.uuid, role: entry.type, blocks: toBlocks(body.content) }]
   })
 }

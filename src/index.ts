@@ -1,5 +1,5 @@
 /**
- * dsh-agent-bridge, Host half. Serves Claude Code and Codex sessions to the browser half over the
+ * dsh-agent-bridge, Host half. Serves Claude Code, Codex and Pi sessions to the browser half over the
  * authenticated Connection Fetch channel: the session list, transcripts, live turns, session management,
  * and a change feed for the transcript file.
  * @module dsh-agent-bridge
@@ -8,6 +8,7 @@ import { statSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -16,11 +17,14 @@ import {
   deleteClaudeSession, findClaudeFile, forkClaudeSession, listClaudeRows, readClaudeGoal, readClaudeMessages, readClaudeUsage, renameClaudeSession, searchClaude,
 } from './claude.ts'
 import { CodexEngine } from './codex.ts'
+import { listPiRows, PiEngine, findPiFile, readPiMessages, readPiUsage, searchPi } from './pi.ts'
 import { probeInfo, probeTools, RunManager, SCREEN_SERVER, type TurnOptions } from './run.ts'
 import { readTasks, tasksAction } from './taskmaster.ts'
 import { voiceAction } from './voice.ts'
 import { watchStream } from './watch.ts'
 import { resolveCommand } from './commands.ts'
+import { claudePermission, codexPermission, parsePreset } from './permissions.ts'
+import { startHeapWatch } from './diagnostics.ts'
 import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig } from './extras.ts'
 import {
   browseDirs, fsAction, gitClone, gitWorktreeAction, gitWorktrees, readImage,
@@ -35,7 +39,7 @@ import {
   CLONE_PATH, GIT_WORKTREES_PATH, SCHEDULE_PATH, type ScheduleBodyWire, type WorktreeBodyWire,
   GIT_COMPARE_PATH, GIT_MESSAGE_PATH, GIT_REMOTE_PATH, GIT_SHOW_PATH,
   TERM_CLOSE_PATH, TERM_INPUT_PATH, TERM_OPEN_PATH, TERM_RESIZE_PATH, TERM_STREAM_PATH, type GitActionWire, type TermEventWire,
-  CLAUDE_ID_PREFIX, CODEX_ID_PREFIX, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, SCREEN_STATUS_PATH, SEND_PATH, SESSIONS_PATH, SESSION_PATH, WATCH_PATH,
+  CLAUDE_ID_PREFIX, CODEX_ID_PREFIX, PI_ID_PREFIX, type EngineName, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, SCREEN_STATUS_PATH, SEND_PATH, SESSIONS_PATH, SESSION_PATH, WATCH_PATH,
   type AnswerBodyWire, type GoalWire, type LiveEventWire, type ManageBodyWire, type MessageWire, type SessionRowWire, type SendBodyWire, type SessionWire,
 } from './protocol.ts'
 
@@ -85,6 +89,12 @@ export interface Settings {
   codexApprovalPolicy: 'untrusted' | 'on-request'
   /** Sandbox of Codex turns started from dsh. */
   codexSandbox: 'read-only' | 'workspace-write'
+  /** Show Pi sessions and allow starting them. Off by default because Pi runs commands and edits files without asking. */
+  piEnabled: boolean
+  /** `pi` executable; each turn starts its RPC mode. Pi runs tool calls without asking. */
+  piExecutable: string
+  /** Heap size in MB that makes the Host write a heap snapshot under `<state folder>/heap`; 0 turns the watch off. */
+  heapWatchMb: number
   /** Tools approved without asking (Claude Code permission-rule syntax, e.g. `Bash(git status)`). */
   allowedTools: string[]
 }
@@ -116,6 +126,9 @@ export const Config = Schema.object({
   codexHistoryTurns: Schema.natural().min(1).default(20),
   codexApprovalPolicy: Schema.union(['untrusted', 'on-request'] as const).default('untrusted'),
   codexSandbox: Schema.union(['read-only', 'workspace-write'] as const).default('workspace-write'),
+  piEnabled: Schema.boolean().default(false),
+  piExecutable: Schema.string().default('pi'),
+  heapWatchMb: Schema.natural().default(0),
   allowedTools: Schema.array(Schema.string()).default([]),
 }).volatile()
 
@@ -134,13 +147,14 @@ function json(body: unknown, status = 200): Response {
 
 /** An external session id split into its engine and the engine's own id. */
 interface EngineId {
-  readonly engine: 'claude' | 'codex'
+  readonly engine: EngineName
   readonly raw: string
 }
 
 function parseId(id: string): EngineId | undefined {
   if (id.startsWith(CLAUDE_ID_PREFIX)) return { engine: 'claude', raw: id.slice(CLAUDE_ID_PREFIX.length) }
   if (id.startsWith(CODEX_ID_PREFIX)) return { engine: 'codex', raw: id.slice(CODEX_ID_PREFIX.length) }
+  if (id.startsWith(PI_ID_PREFIX)) return { engine: 'pi', raw: id.slice(PI_ID_PREFIX.length) }
   return undefined
 }
 
@@ -148,11 +162,13 @@ function idOf(request: Request): EngineId | undefined {
   return parseId(new URL(request.url, 'http://host').searchParams.get('id') ?? '')
 }
 
-function prefixed(engine: 'claude' | 'codex', raw: string): string {
-  return `${engine === 'claude' ? CLAUDE_ID_PREFIX : CODEX_ID_PREFIX}${raw}`
+const ID_PREFIXES: Readonly<Record<EngineName, string>> = { claude: CLAUDE_ID_PREFIX, codex: CODEX_ID_PREFIX, pi: PI_ID_PREFIX }
+
+function prefixed(engine: EngineName, raw: string): string {
+  return `${ID_PREFIXES[engine]}${raw}`
 }
 
-/** What the routes need from an engine; Claude and Codex each provide one. */
+/** What the routes need from an engine; each engine provides one. */
 interface Driver {
   readMessages(id: string): Promise<{ messages: MessageWire[]; recentTurns?: number }>
   readGoal(id: string): Promise<GoalWire | undefined>
@@ -166,7 +182,7 @@ interface Driver {
   delete(id: string): Promise<void>
 }
 
-async function watchResponse(request: Request, intervalMs: number, driverOf: (engine: 'claude' | 'codex') => Driver): Promise<Response> {
+async function watchResponse(request: Request, intervalMs: number, driverOf: (engine: EngineName) => Driver): Promise<Response> {
   const parsed = idOf(request)
   const file = parsed === undefined ? undefined : await driverOf(parsed.engine).findFile(parsed.raw)
   if (file === undefined) return json({ error: 'unknown session' }, 404)
@@ -193,7 +209,7 @@ function turnOptions(settings: Settings, sessionId: string | undefined, text: st
   }
 }
 
-function liveResponse(request: Request, driverOf: (engine: 'claude' | 'codex') => Driver): Response {
+function liveResponse(request: Request, driverOf: (engine: EngineName) => Driver): Response {
   const parsed = idOf(request)
   if (parsed === undefined) return json({ error: 'unknown session' }, 404)
   const encoder = new TextEncoder()
@@ -229,6 +245,7 @@ export function apply(ctx: Context, config: Config): void {
       ...settings,
       claudeExecutable: resolveCommand(settings.claudeExecutable),
       codexExecutable: resolveCommand(settings.codexExecutable),
+      piExecutable: resolveCommand(settings.piExecutable),
       peekabooCommand: resolveCommand(settings.peekabooCommand),
     }
   }
@@ -239,12 +256,18 @@ export function apply(ctx: Context, config: Config): void {
     codexEngine ??= new CodexEngine(current().codexExecutable)
     return codexEngine
   }
+  let piEngine: PiEngine | undefined
+  const pi = (): PiEngine => {
+    piEngine ??= new PiEngine(current().piExecutable)
+    return piEngine
+  }
   const store = new StateStore(process.env['AGENT_BRIDGE_STATE'] ?? defaultStatePath(), defaultStatePath('external-engines'))
   const terminals = new TerminalManager()
   ctx.effect(() => () => {
     terminals.closeAll()
     void runs.closeAll()
     void codexEngine?.closeAll()
+    piEngine?.closeAll()
   }, 'agent-bridge: runs')
   const claudeDriver: Driver = {
     readMessages: async id => ({ messages: await readClaudeMessages(id) }),
@@ -278,7 +301,25 @@ export function apply(ctx: Context, config: Config): void {
     rename: (id, title) => codex().rename(id, title),
     delete: id => codex().delete(id),
   }
-  const driverOf = (engine: 'claude' | 'codex'): Driver => engine === 'claude' ? claudeDriver : codexDriver
+  const piDriver: Driver = {
+    readMessages: async id => ({ messages: await readPiMessages(id) }),
+    readGoal: () => Promise.resolve(undefined),
+    findFile: findPiFile,
+    subscribe: (id, subscriber) => pi().subscribe(id, subscriber),
+    isRunning: id => pi().isRunning(id),
+    interrupt: id => Promise.resolve(pi().interrupt(id)),
+    answer: (id, requestId, body) => pi().answer(id, requestId, body.behavior === 'allow'
+      ? { behavior: 'allow', ...body.answers === undefined ? {} : { answers: body.answers } }
+      : { behavior: 'deny' }),
+    fork: id => pi().fork(id),
+    rename: (id, title) => pi().rename(id, title),
+    delete: id => pi().delete(id),
+  }
+  const drivers: Readonly<Record<EngineName, Driver>> = { claude: claudeDriver, codex: codexDriver, pi: piDriver }
+  const driverOf = (engine: EngineName): Driver => drivers[engine]
+  const heapWatchMb = current().heapWatchMb
+  const heapWatch = heapWatchMb > 0 ? startHeapWatch(join(dirname(defaultStatePath()), 'heap'), heapWatchMb) : undefined
+  ctx.effect(() => () => { heapWatch?.stop() }, 'agent-bridge: heap watch')
   const route = (
     path: string, handler: (request: Request, config: Settings) => Promise<Response> | Response, label: string, method: 'GET' | 'POST' | 'BOTH' = 'GET',
   ): void => {
@@ -288,11 +329,14 @@ export function apply(ctx: Context, config: Config): void {
       requestBody: 'buffered',
       fetch: async (request) => {
         if (!current().enabled) return json({ error: 'disabled' }, 404)
+        const left = heapWatch?.enter(label)
         try {
           return await handler(request, current())
         } catch (error) {
           if (error instanceof HttpError) return json({ error: error.message }, error.status)
           return json({ error: error instanceof Error ? error.message : String(error) }, 500)
+        } finally {
+          left?.()
         }
       },
     }), `agent-bridge: ${label} route`)
@@ -309,20 +353,22 @@ export function apply(ctx: Context, config: Config): void {
     }
     const archived = new Set(store.get('archived'))
     const wantArchived = query(request, 'archived') === '1'
-    const all = [...await listClaudeRows(settings.sessionLimit), ...codexRows]
+    const piRows = settings.piEnabled ? await listPiRows(settings.sessionLimit) : []
+    const all = [...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows]
     const rows = all.filter(row => archived.has(row.id) === wantArchived).sort((a, b) => b.updatedAt - a.updatedAt)
     const running = rows.filter((row) => {
       const parsed = parseId(row.id)
       return parsed !== undefined && driverOf(parsed.engine).isRunning(parsed.raw)
     }).map(row => row.id)
-    return json({ sessions: rows, running, pinned: store.get('pinned'), defaultCwd: homedirOf(settings), codexEnabled: settings.codexEnabled, warnings })
+    return json({ sessions: rows, running, pinned: store.get('pinned'), defaultCwd: homedirOf(settings), codexEnabled: settings.codexEnabled, // A bare name means the command was not found, so no new-session entry is offered.
+      piEnabled: settings.piEnabled && settings.piExecutable.includes('/'), warnings })
   }, 'sessions')
   route(SESSION_PATH, async (request) => {
     const parsed = idOf(request)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
     const driver = driverOf(parsed.engine)
     const goal = await driver.readGoal(parsed.raw)
-    const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw) : undefined
+    const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw) : parsed.engine === 'pi' ? await readPiUsage(parsed.raw) : undefined
     const page = await driver.readMessages(parsed.raw)
     const body: SessionWire = { messages: page.messages, ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
     return json(body)
@@ -333,10 +379,17 @@ export function apply(ctx: Context, config: Config): void {
     const parsed = body.id === undefined ? undefined : parseId(body.id)
     const engine = parsed?.engine ?? body.engine ?? 'claude'
     // A resumed session runs in its own folder; the browser sends it, and a caller that does not is looked up.
-    const knownCwd = body.cwd ?? (parsed?.engine === 'claude' ? (await listClaudeRows(Math.max(settings.sessionLimit, 1000))).find(row => row.id === body.id)?.cwd : undefined)
+    const rowsOf = parsed?.engine === 'claude' ? listClaudeRows : parsed?.engine === 'pi' ? listPiRows : undefined
+    const knownCwd = body.cwd ?? (await rowsOf?.(Math.max(settings.sessionLimit, 1000)))?.find(row => row.id === body.id)?.cwd
     const cwd = knownCwd === undefined || knownCwd === '' ? homedirOf(settings) : knownCwd
     // The engines report a missing folder as a missing executable; say what is actually wrong.
     if (statSync(cwd, { throwIfNoEntry: false })?.isDirectory() !== true) throw new HttpError(400, `the working directory no longer exists: ${cwd}`)
+    let preset
+    try {
+      preset = parsePreset(body.permission)
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : String(error))
+    }
     const attached = await prepareAttachments(body.attachments)
     const text = `${body.text}${attached.note}`
     const clearDraft = (): void => { store.set('drafts', Object.fromEntries(Object.entries(store.get('drafts')).filter(([key]) => key !== (body.id ?? '')))) }
@@ -344,15 +397,26 @@ export function apply(ctx: Context, config: Config): void {
       if (!settings.codexEnabled) throw new HttpError(404, 'codex is disabled')
       const id = await codex().start({
         ...parsed === undefined ? {} : { threadId: parsed.raw },
-        cwd, text, approvalPolicy: settings.codexApprovalPolicy, sandbox: settings.codexSandbox,
+        cwd, text, ...codexPermission(preset, { approvalPolicy: settings.codexApprovalPolicy, sandbox: settings.codexSandbox }),
         ...body.model === undefined ? {} : { model: body.model }, ...body.effort === undefined ? {} : { effort: body.effort },
         images: attached.imagePaths,
       })
       clearDraft()
       return { id: prefixed('codex', id) }
     }
+    if (engine === 'pi') {
+      if (!settings.piEnabled) throw new HttpError(404, 'pi is disabled')
+      const id = await pi().start({
+        ...parsed === undefined ? {} : { sessionId: parsed.raw },
+        cwd, text,
+        ...body.model === undefined ? {} : { model: body.model }, ...body.effort === undefined ? {} : { effort: body.effort },
+        images: attached.images,
+      })
+      clearDraft()
+      return { id: prefixed('pi', id) }
+    }
     const memory = settings.memoryFile === '' ? '' : await readFile(settings.memoryFile, 'utf8')
-    const id = await runs.start(turnOptions(settings, parsed?.raw, text, cwd, memory, {
+    const id = await runs.start(turnOptions({ ...settings, permissionMode: claudePermission(preset, settings.permissionMode) as Settings['permissionMode'] }, parsed?.raw, text, cwd, memory, {
       ...body.model === undefined ? {} : { model: body.model }, ...body.effort === undefined ? {} : { effort: body.effort }, images: attached.images,
     }))
     clearDraft()
@@ -473,7 +537,8 @@ export function apply(ctx: Context, config: Config): void {
   const infoCache = new Map<string, { at: number; info: InfoWire }>()
   const infoLoads = new Map<string, Promise<InfoWire>>()
   route(INFO_PATH, async (request, settings) => {
-    const engine = query(request, 'engine') === 'codex' ? 'codex' : 'claude'
+    const wanted = query(request, 'engine')
+    const engine: EngineName = wanted === 'codex' || wanted === 'pi' ? wanted : 'claude'
     const asked = query(request, 'cwd') || homedirOf(settings)
     // A project folder that was deleted or moved must not break the lists: fall back to the home directory.
     const cwd = statSync(asked, { throwIfNoEntry: false })?.isDirectory() === true ? asked : homedir()
@@ -482,9 +547,12 @@ export function apply(ctx: Context, config: Config): void {
     const load = (force: boolean): Promise<InfoWire> => {
       const running = infoLoads.get(key)
       if (running !== undefined && !force) return running
-      const started: Promise<InfoWire> = (engine === 'codex'
-        ? codex().listModels().then(async models => ({ models, commands: [], mcp: [], account: await codex().readAccount(), defaults: await codex().readDefaults(models) }))
-        : probeInfo(turnOptions(settings, undefined, '', cwd)))
+      const asking = (): Promise<InfoWire> => {
+        if (engine === 'pi') return pi().readInfo(cwd)
+        if (engine === 'codex') return codex().listModels().then(async models => ({ models, commands: [], mcp: [], account: await codex().readAccount(), defaults: await codex().readDefaults(models) }))
+        return probeInfo(turnOptions(settings, undefined, '', cwd))
+      }
+      const started: Promise<InfoWire> = asking()
         .then((info) => { if (infoLoads.get(key) === started) infoCache.set(key, { at: Date.now(), info }); return info })
         .finally(() => { if (infoLoads.get(key) === started) infoLoads.delete(key) })
       infoLoads.set(key, started)
@@ -508,6 +576,10 @@ export function apply(ctx: Context, config: Config): void {
         if (!archived.has(row.id)) hits.push({ id: row.id, title: row.title, snippet: '', cwd: row.cwd })
       }
     }
+    if (settings.piEnabled) {
+      const piRows = (await listPiRows(settings.sessionLimit)).filter(row => !archived.has(row.id))
+      hits.push(...await searchPi(piRows, term, 30))
+    }
     return json({ hits })
   }, 'search')
   route(DRAFT_PATH, async (request) => {
@@ -522,10 +594,17 @@ export function apply(ctx: Context, config: Config): void {
   route(CHOICE_PATH, async (request) => {
     if (request.method === 'GET') return json(store.get('choices')[query(request, 'engine')] ?? { model: '', effort: '' })
     const body = await request.json() as { engine: unknown } & Record<keyof ChoiceWire, unknown>
-    if ((body.engine !== 'claude' && body.engine !== 'codex') || typeof body.model !== 'string' || typeof body.effort !== 'string' || body.model.length > 200 || body.effort.length > 50) {
+    if ((body.engine !== 'claude' && body.engine !== 'codex' && body.engine !== 'pi') || typeof body.model !== 'string' || typeof body.effort !== 'string' || body.model.length > 200 || body.effort.length > 50) {
       return json({ error: 'invalid choice' }, 400)
     }
-    store.set('choices', { ...store.get('choices'), [body.engine]: { model: body.model, effort: body.effort } })
+    let permission
+    try {
+      permission = parsePreset(body.permission)
+    } catch {
+      // The reason is the one this answer already gives.
+      return json({ error: 'invalid choice' }, 400)
+    }
+    store.set('choices', { ...store.get('choices'), [body.engine]: { model: body.model, effort: body.effort, ...permission === undefined ? {} : { permission } } })
     return json({ ok: true })
   }, 'choice', 'BOTH')
   route(ARCHIVE_PATH, async (request) => {

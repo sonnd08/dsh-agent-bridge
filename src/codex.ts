@@ -17,8 +17,8 @@ export interface CodexTurnOptions {
   readonly threadId?: string
   readonly cwd: string
   readonly text: string
-  readonly approvalPolicy: 'untrusted' | 'on-request'
-  readonly sandbox: 'read-only' | 'workspace-write'
+  readonly approvalPolicy: 'untrusted' | 'on-request' | 'never'
+  readonly sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
   /** Model and reasoning effort for this turn; undefined keeps the thread's. */
   readonly model?: string
   readonly effort?: string
@@ -159,7 +159,11 @@ function textOfContent(content: unknown): string {
 /** Tool output longer than this is cut, so one noisy command cannot make a session too large to send. */
 const TOOL_OUTPUT_LIMIT = 20_000
 
-const capped = (text: string): string => text.length > TOOL_OUTPUT_LIMIT ? `${text.slice(0, TOOL_OUTPUT_LIMIT)}…` : text
+/**
+ * @param text - tool output.
+ * @returns the text, cut when longer than the limit.
+ */
+export const capped = (text: string): string => text.length > TOOL_OUTPUT_LIMIT ? `${text.slice(0, TOOL_OUTPUT_LIMIT)}…` : text
 
 function toMessages(item: Json): MessageWire[] {
   const id = String(item['id'])

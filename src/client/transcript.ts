@@ -5,7 +5,7 @@
  */
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  ANSWER_PATH, ARCHIVE_PATH, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_SESSION_ID, SEND_PATH, SESSION_PATH, WATCH_PATH,
+  ANSWER_PATH, ARCHIVE_PATH, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, NEW_SESSION_ID, engineOfSession, SEND_PATH, SESSION_PATH, WATCH_PATH,
   type AnswerBodyWire, type GoalWire, type LiveEventWire, type ManageBodyWire, type MessageWire, type PermissionWire, type SendBodyWire, type SessionWire, type UsageWire, type AttachmentWire,
 } from '../protocol.ts'
 
@@ -93,7 +93,7 @@ export interface TranscriptHooks {
 
 /** @param id - external session id. @returns whether it is a new-session draft. */
 export function isDraft(id: string | undefined): boolean {
-  return id === NEW_SESSION_ID || id === NEW_CODEX_SESSION_ID
+  return id === NEW_SESSION_ID || id === NEW_CODEX_SESSION_ID || id === NEW_PI_SESSION_ID
 }
 
 const IDLE: TranscriptState = Object.freeze({
@@ -237,7 +237,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
       pendingBase = state.messages.length
       patch({ running: true, pendingUser: text, partial: '', error: undefined })
       try {
-        const body: SendBodyWire = { ...draft ? { text, cwd, engine: current === NEW_CODEX_SESSION_ID ? 'codex' : 'claude' } : { id: current, text, ...cwd === '' ? {} : { cwd } }, ...extras }
+        const body: SendBodyWire = { ...draft ? { text, cwd, engine: engineOfSession(current) } : { id: current, text, ...cwd === '' ? {} : { cwd } }, ...extras }
         const response = await post(SEND_PATH, body)
         if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`)
         const { id } = await response.json() as { id: string }

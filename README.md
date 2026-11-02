@@ -11,6 +11,7 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 - **One sidebar for all your agents.** Claude Code and Codex sessions are listed in the stock DSH Workspace browser under their project folder, with a small Claude or Codex mark on each row.
 - **The stock row menu works on them.** Pin, Rename and Archive use DSH's own menu items, pin indicator and rename dialog. Pins and archives survive restarts.
 - **Continue any session.** Opening a row shows the full transcript. You can send messages, stop a turn, answer permission prompts and questions, pick the model and reasoning effort, and attach images. Claude runs through the Claude Agent SDK and Codex through `codex app-server`, so the sessions stay compatible with the CLIs.
+- **Same controls as DSH.** Enter sends and Shift+Enter starts a new line. A running session shows DSH's own spinner in its row. For Claude and Codex, the permission menu beside the attach button chooses Default (ask each time), Read Only, Workspace Write or Full Access; Full Access needs confirming first, the choice is kept per engine, and scheduled messages always use Default. Claude's thinking summaries appear above its replies once each thinking block completes.
 - **Start new sessions** in any folder, or clone a repository first.
 - **Search the contents of every session.**
 - **Workbench tabs** next to each conversation:
@@ -25,6 +26,7 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
   - A browser through [Playwright MCP](https://github.com/microsoft/playwright-mcp).
   - Voice dictation and read-aloud through any OpenAI-compatible speech endpoint.
   - Desktop notifications when a turn ends.
+- **Pi sessions, off by default.** Turn on `piEnabled` to list and continue Pi sessions too. Pi runs commands and edits files without asking, so a message sent from DSH acts with your user's rights. Only dialogs raised by Pi extensions appear as cards; dialogs that need typed text are cancelled.
 - **Safe fallback.** If a future DSH release changes the sidebar so the plugin cannot join it, the sessions move to a standalone "Claude / Codex" page instead of breaking the sidebar.
 
 ## Requirements
@@ -33,6 +35,7 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 - Node.js 22.19 or newer. DSH ships its own Node.js.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), installed and logged in.
 - [Codex CLI](https://github.com/openai/codex) is optional. Without it, only Claude sessions are listed.
+- Pi is optional and tested with 1.4.0.
 - Developed and tested on macOS. Linux should work; Windows is untested.
 
 ## Install
@@ -66,6 +69,8 @@ Every option has a default, so no configuration is required. To change one, add 
 | `codexApprovalPolicy` | `untrusted` | `untrusted` or `on-request`. |
 | `codexSandbox` | `workspace-write` | `read-only` or `workspace-write`. |
 | `codexHistoryTurns` | `20` | How many recent Codex turns to load when a session is opened. |
+| `piEnabled` | `false` | List and run Pi sessions. Pi does not ask before acting. |
+| `piExecutable` | `pi` | Pi command or path, looked up the same way. |
 | `permissionMode` | `default` | Claude permission mode: `default`, `acceptEdits` or `plan`. |
 | `allowedTools` | `[]` | Claude tools that run without asking. |
 | `sessionLimit` | `100` | Most recent sessions listed per engine. |
@@ -80,14 +85,21 @@ Every option has a default, so no configuration is required. To change one, add 
 | `voiceSttModel`, `voiceTtsModel`, `voiceTtsVoice` | `whisper-1`, `tts-1`, `alloy` | Speech models and voice. |
 | `taskmasterCommand` | `npx` | Command used to run TaskMaster. |
 | `watchIntervalMs` | `500` | How often an open transcript is checked for changes. |
+| `heapWatchMb` | `0` | For diagnosing memory problems: heap size in MB that writes one heap snapshot and a log under `~/.dsh/agent-bridge/heap`. A snapshot can hold conversation text. `0` is off. |
 
 ## Data and privacy
 
-- The plugin reads sessions where the CLIs keep them: `~/.claude` (or `CLAUDE_CONFIG_DIR`) and `~/.codex`. It never uploads them.
+- The plugin reads sessions where the CLIs keep them: `~/.claude` (or `CLAUDE_CONFIG_DIR`), `~/.codex`, and, when Pi is on, `~/.pi/agent/sessions` (or `PI_CODING_AGENT_SESSION_DIR`, `PI_CODING_AGENT_DIR`). It never uploads them.
 - Rename, fork and delete change the CLI's own session files, so the CLIs see the same result.
 - Pins, archives, drafts and scheduled messages are stored in `~/.dsh/agent-bridge/state.json`.
 - The terminal, file and git tabs act on your machine with your user's rights. They are served only to the DSH UI, behind DSH's own login token.
 - Voice sends audio and text only to the speech endpoint you configure.
+
+## Known limits
+
+- Very long sessions use a lot of memory: opening a Claude session reads its whole file three times, and a Pi session twice. A 67 MB session peaks near 500 MB per request.
+- A Pi session with a malformed entry does not open.
+- Pi: commands run with `!` and compaction summaries are not shown in the transcript, a custom `sessionDir` in Pi's settings is not followed, and file edits have no diff view.
 
 ## Development
 

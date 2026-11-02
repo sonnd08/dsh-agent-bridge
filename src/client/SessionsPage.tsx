@@ -3,8 +3,9 @@
  * While the page shows, the core sidebar column is collapsed so the list takes its place.
  * @module dsh-agent-bridge/SessionsPage
  */
+import { StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CODEX_ID_PREFIX } from '../protocol.ts'
+import { engineOfSession } from '../protocol.ts'
 import { ExternalPanel, type ExternalPanelProps } from './ExternalPanel.tsx'
 import { IconSearch } from './icons.tsx'
 import { groupByFolder, type SessionRow } from './sessions.ts'
@@ -27,7 +28,7 @@ function age(updatedAt: number, now: number): string {
 function SessionItem({ row, selected, level, now, onOpen }: {
   row: SessionRow; selected: boolean; level: number; now: number; onOpen: (id: string) => void
 }) {
-  const engine = row.id.startsWith(CODEX_ID_PREFIX) ? 'codex' : 'claude'
+  const engine = engineOfSession(row.id)
   return (
     <li
       role="treeitem" aria-level={level} aria-selected={selected} tabIndex={-1} data-id={row.id}
@@ -35,7 +36,9 @@ function SessionItem({ row, selected, level, now, onOpen }: {
       onClick={() => { onOpen(row.id) }}
       onKeyDown={(event) => { if (event.key === 'Enter') onOpen(row.id) }}
     >
-      <span data-engine={engine} />
+      {row.running === true
+        ? <span className={css.itemStatus}><StateDot state="ongoing" /></span>
+        : <span data-engine={engine} />}
       <span className={css.itemTitle} title={row.title}>{row.title}</span>
       {!isDraft(row.id) && <span className={css.age}>{age(row.updatedAt, now)}</span>}
     </li>

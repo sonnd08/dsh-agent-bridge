@@ -35,3 +35,10 @@ test('every engine mark draws at one size, keeping the title where it was', () =
   const sized = ENGINE_MARK_CSS.split('\n').filter(line => /\[data-engine="[a-z]+"\][^{]*\{[^}]*(width|height|margin)/.test(line))
   assert.deepEqual(sized, [], 'no engine may override the shared size')
 })
+
+test('pi rows show a pi letter in the text colour, not a coloured engine mark', () => {
+  const rule = ENGINE_MARK_CSS.split('\n').find(line => line.startsWith('[data-engine="pi"]'))
+  assert.ok(rule, 'no mark rule for pi')
+  assert.match(rule, /background-color: var\(--dsw-alias-label-primary\)/)
+  assert.doesNotMatch(rule, /background-image/)
+})

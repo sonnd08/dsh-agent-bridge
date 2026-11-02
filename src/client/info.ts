@@ -1,6 +1,6 @@
 /** What the engine offers for a working directory (models, commands, MCP servers, account), cached per page. */
 import { useCallback, useEffect, useState } from 'react'
-import { INFO_PATH, type InfoWire } from '../protocol.ts'
+import { INFO_PATH, type EngineName, type InfoWire } from '../protocol.ts'
 
 const cache = new Map<string, InfoWire>()
 /** Latest info per engine, shown for a folder whose own info is still loading; models and defaults rarely differ between folders. */
@@ -8,7 +8,7 @@ const latest = new Map<string, InfoWire>()
 const inflight = new Map<string, Promise<InfoWire>>()
 
 /** Fetch (or reuse) the info of one engine and directory. */
-export async function loadInfo(engine: 'claude' | 'codex', cwd: string, fresh = false): Promise<InfoWire> {
+export async function loadInfo(engine: EngineName, cwd: string, fresh = false): Promise<InfoWire> {
   const key = `${engine}:${cwd}`
   const known = cache.get(key)
   if (known !== undefined && !fresh) return known
@@ -28,7 +28,7 @@ export async function loadInfo(engine: 'claude' | 'codex', cwd: string, fresh = 
 }
 
 /** Hook over {@link loadInfo}. */
-export function useInfo(engine: 'claude' | 'codex', cwd: string | undefined): {
+export function useInfo(engine: EngineName, cwd: string | undefined): {
   info: InfoWire | undefined; error: string | undefined; reload: () => void
 } {
   // Kept with the engine and folder it was loaded for, so another session never shows this one's models.

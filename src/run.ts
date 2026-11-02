@@ -87,6 +87,10 @@ function baseOptions(options: TurnOptions): Options {
     ...options.sessionId === undefined ? {} : { resume: options.sessionId },
     pathToClaudeCodeExecutable: options.executable,
     permissionMode: options.permissionMode,
+    // Without this the model returns empty thinking blocks, and the transcript has no reasoning to show.
+    thinking: { type: 'adaptive', display: 'summarized' },
+    // The SDK refuses this mode without the second flag; the composer asks the user to confirm before choosing it.
+    ...options.permissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {},
     allowedTools: [
       ...options.allowedTools,
       ...options.computerUse ? SCREEN_READ_ONLY.map(tool => `mcp__${SCREEN_SERVER}__${tool}`) : [],

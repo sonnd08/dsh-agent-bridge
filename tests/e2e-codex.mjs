@@ -58,12 +58,17 @@ async function dismissOverlays() {
       // The overlay is not shown on this load.
     }
   }
+  // A fresh home also asks to sign in; the dialog closes on Escape.
+  for (let i = 0; i < 4 && await page.locator('[role="dialog"]').count() > 0; i++) {
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(400)
+  }
   await page.waitForTimeout(500)
 }
 async function ensureTreeOpen() {
-  if (await page.getByRole('treeitem').count() > 1) return
-  await page.getByText('Ungrouped', { exact: true }).first().click().catch(() => {})
-  await page.getByRole('treeitem').nth(1).waitFor({ timeout: 10000 })
+  const ungrouped = page.getByRole('treeitem').filter({ hasText: /^(Ungrouped|未分组)$/ }).first()
+  await ungrouped.waitFor({ timeout: 15000 })
+  if (await ungrouped.getAttribute('aria-expanded') === 'false') await ungrouped.click()
 }
 const idle = () => page.locator('[data-testid="ext-summary"][data-running="false"]')
 async function send(text) {
@@ -166,6 +171,28 @@ await step('interrupt: Stop ends a running turn', async () => {
   await page.locator('[data-testid="ext-partial"]').waitFor({ timeout: 60000 })
   await page.locator('[data-testid="ext-stop"]').click()
   await idle().waitFor({ timeout: 45000 })
+})
+
+async function pickPermission(name) {
+  await page.locator('[data-testid="ext-permission-trigger"]').click()
+  await page.locator('[role="menu"] button, [role="menu"] [role="menuitem"]').filter({ hasText: name }).first().click()
+}
+
+await step('the read-only choice stops Codex from writing, and the default choice is restored', async () => {
+  const blocked = `${LIVE_CWD}/read-only.txt`
+  await pickPermission(/^(Read Only|仅可查看)/)
+  await page.waitForTimeout(500)
+  await send(writePrompt(blocked))
+  const deadline = Date.now() + TURN_MS
+  while (Date.now() < deadline && await idle().count() === 0) {
+    const deny = page.locator('[data-testid="ext-deny"]')
+    if (await deny.count() > 0) await deny.first().click().catch(() => {})
+    await page.waitForTimeout(500)
+  }
+  assert(await idle().count() > 0, 'turn did not end in time')
+  assert(!existsSync(blocked), 'the read-only sandbox must stop the write')
+  await pickPermission(/^(Default permission|默认权限)/)
+  await page.waitForTimeout(500)
 })
 
 await step('manage: fork copies the thread, rename retitles it, delete removes it', async () => {

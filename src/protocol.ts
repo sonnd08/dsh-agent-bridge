@@ -45,6 +45,31 @@ export const CODEX_ID_PREFIX = 'codex:'
 /** Row id of the draft entry that opens an empty composer for a new Codex session. */
 export const NEW_CODEX_SESSION_ID = 'codex:new'
 
+/** Id prefix of Pi sessions inside the external id space. */
+export const PI_ID_PREFIX = 'pi:'
+
+/** Row id of the draft entry that opens an empty composer for a new Pi session. */
+export const NEW_PI_SESSION_ID = 'pi:new'
+
+/** The coding agents the plugin drives. */
+export type EngineName = 'claude' | 'codex' | 'pi'
+
+/**
+ * @param id - external session or draft id.
+ * @returns the engine that owns it; anything without another engine's prefix is Claude's.
+ */
+export function engineOfSession(id: string | undefined): EngineName {
+  if (id?.startsWith(CODEX_ID_PREFIX) === true) return 'codex'
+  if (id?.startsWith(PI_ID_PREFIX) === true) return 'pi'
+  return 'claude'
+}
+
+/** Permission choices of the composer; Pi offers none. */
+export const PERMISSION_PRESETS = ['readOnly', 'workspaceWrite', 'fullAccess'] as const
+
+/** One permission choice of the composer. */
+export type PermissionPreset = typeof PERMISSION_PRESETS[number]
+
 /** One session row as the Host publishes it. */
 export interface SessionRowWire {
   readonly id: string
@@ -152,13 +177,15 @@ export type LiveEventWire =
 /** Body of the send route. */
 export interface SendBodyWire {
   /** Engine of a new session; ignored when `id` is set. */
-  readonly engine?: 'claude' | 'codex'
+  readonly engine?: EngineName
   readonly id?: string
   readonly cwd?: string
   readonly text: string
   /** Model and reasoning effort for this turn; empty uses the engine default. */
   readonly model?: string
   readonly effort?: string
+  /** Permissions of this turn; absent uses the configured ones. Pi ignores it. */
+  readonly permission?: PermissionPreset
   /** Files attached to the message. */
   readonly attachments?: readonly AttachmentWire[]
 }
@@ -255,7 +282,7 @@ export type FsActionWire =
   | { readonly cwd: string; readonly action: 'upload'; readonly path: string; readonly name: string; readonly base64: string }
 
 /** Model and effort used for an engine's messages; an empty string leaves the choice to the engine. */
-export interface ChoiceWire { readonly model: string; readonly effort: string }
+export interface ChoiceWire { readonly model: string; readonly effort: string; readonly permission?: PermissionPreset | '' }
 
 /** One image read for preview. */
 export interface FsImageWire { readonly mime: string; readonly base64: string }

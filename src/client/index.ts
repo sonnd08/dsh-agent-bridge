@@ -14,7 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type { ExternalSessionSource } from '@deepseek-ai/dsh-client-ui-workspace/client'
-import { ARCHIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, PIN_PATH, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
+import { ARCHIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
 import { applyEngineMarks } from './branding.tsx'
 import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
@@ -60,11 +60,13 @@ export function apply(ctx: ClientContext): void {
   /** Rows created in this page session; kept until the engine lists them (Codex does not list a fork before its first own turn). */
   const created = new Map<string, SessionRow>()
   let codexEnabled = false
+  let piEnabled = false
   let running = new Set<string>()
   const isZh = (): boolean => ctx.locale.getSnapshot().active.startsWith('zh')
   const draftRows = (): SessionRow[] => [
     { id: NEW_SESSION_ID, title: isZh() ? '＋ 新建 Claude 会话' : '+ New Claude session', cwd: defaultCwd, updatedAt: Date.now() },
     ...codexEnabled ? [{ id: NEW_CODEX_SESSION_ID, title: isZh() ? '＋ 新建 Codex 会话' : '+ New Codex session', cwd: defaultCwd, updatedAt: Date.now() }] : [],
+    ...piEnabled ? [{ id: NEW_PI_SESSION_ID, title: isZh() ? '＋ 新建 Pi 会话' : '+ New Pi session', cwd: defaultCwd, updatedAt: Date.now() }] : [],
   ]
   const transcript = createTranscriptController({
     onCreated(id, cwd, prompt) {
@@ -145,18 +147,19 @@ export function apply(ctx: ClientContext): void {
     try {
       const response = await fetch(SESSIONS_PATH, { credentials: 'same-origin' })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const body = await response.json() as { sessions: SessionRowWire[]; running: string[]; pinned?: string[]; defaultCwd: string; codexEnabled: boolean; warnings: string[] }
+      const body = await response.json() as { sessions: SessionRowWire[]; running: string[]; pinned?: string[]; defaultCwd: string; codexEnabled: boolean; piEnabled: boolean; warnings: string[] }
       const previouslyRunning = running
       running = new Set(body.running)
       for (const id of endedSince(previouslyRunning, running)) {
         const known = [...wireRows, ...rows].find(row => row.id === id)
-        notifyEnded((known?.title ?? id).replace(/^▶ /, ''), isZh() ? '回合已结束' : 'The turn has ended')
+        notifyEnded(known?.title ?? id, isZh() ? '回合已结束' : 'The turn has ended')
       }
       defaultCwd = body.defaultCwd
       codexEnabled = body.codexEnabled
+      piEnabled = body.piEnabled
       pinned = body.pinned ?? []
       for (const warning of body.warnings) console.warn('agent-bridge:', warning)
-      const listed = body.sessions.map(wire => ({ ...toRow(wire), ...running.has(wire.id) ? { title: `▶ ${wire.title}` } : {} }))
+      const listed = body.sessions.map(wire => ({ ...toRow(wire), running: running.has(wire.id) }))
       for (const id of [...created.keys()]) if (listed.some(row => row.id === id) && !id.startsWith('codex:')) created.delete(id)
       wireRows = [...[...created.values()].filter(row => !listed.some(item => item.id === row.id)), ...listed]
       rows = [...draftRows(), ...wireRows]

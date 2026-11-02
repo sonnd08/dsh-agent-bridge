@@ -1,8 +1,9 @@
-/** Controls of the composer card: model, effort, attachments, and the slash-command menu. */
+/** Controls of the composer card: permission, model, effort, attachments, and the slash-command menu. */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconPlus } from './icons.tsx'
-import { CHOICE_PATH, type AttachmentWire, type ChoiceWire, type CommandWire, type InfoWire } from '../protocol.ts'
+import { CHOICE_PATH, type AttachmentWire, type ChoiceWire, type CommandWire, type EngineName, type InfoWire } from '../protocol.ts'
 import type { Translate } from './ToolCard.tsx'
+import { PermissionPicker } from './PermissionPicker.tsx'
 import { DictateButton, useVoiceEnabled } from './voice.tsx'
 import css from './ExternalPanel.module.css'
 
@@ -88,11 +89,12 @@ export function AttachmentChips({ attachments, onRemove, t }: { attachments: rea
 }
 
 /**
- * Toolbar controls of the composer card. As in the dsh composer, the leading part (attach, dictate)
+ * Toolbar controls of the composer card. As in the dsh composer, the leading part (attach, permission, dictate)
  * opens the toolbar and the trailing part (model, effort) sits beside the send button.
  */
-export function ComposerBar({ part, info, choice, onChoice, onAttach, onDictated, t }: {
+export function ComposerBar({ part, engine, info, choice, onChoice, onAttach, onDictated, t }: {
   part: 'leading' | 'trailing'
+  engine: EngineName
   info: InfoWire | undefined
   choice: Choice
   onChoice: (choice: Choice) => void
@@ -128,6 +130,7 @@ export function ComposerBar({ part, info, choice, onChoice, onAttach, onDictated
           ref={setPicker} type="file" multiple hidden data-testid="ext-attach-input"
           onChange={(event) => { onAttach(Array.from(event.target.files ?? [])); event.target.value = '' }}
         />
+        {engine !== 'pi' && <PermissionPicker value={choice.permission ?? ''} onChange={(permission) => { update({ permission }) }} t={t} />}
         {voice && <DictateButton onText={onDictated} t={t} className={css.iconTool} />}
       </>
     )

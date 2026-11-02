@@ -126,7 +126,7 @@ export function mergeList(list: SessionListLike, external: GraftSnapshot, extern
       title: row.title,
       displayTitle: row.title,
       cwd: row.cwd,
-      running: false,
+      running: row.running === true,
       retainedBy: externalShown && row.id === external.selectedId ? { mainView: 1 } : {},
       blank: false,
       updatedAt: row.updatedAt,

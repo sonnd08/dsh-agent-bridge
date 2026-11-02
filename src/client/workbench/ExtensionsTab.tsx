@@ -1,13 +1,13 @@
 /** Account, MCP servers, skills and the git identity. */
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
-import { GIT_CONFIG_PATH, MCP_PATH, SKILLS_PATH, type McpBodyWire, type SkillBodyWire, type SkillWire } from '../../protocol.ts'
+import { GIT_CONFIG_PATH, MCP_PATH, SKILLS_PATH, type EngineName, type McpBodyWire, type SkillBodyWire, type SkillWire } from '../../protocol.ts'
 import { useInfo } from '../info.ts'
 import { call, ConfirmButton, message, type TabProps } from './api.tsx'
 import css from './Workbench.module.css'
 
 /** Extensions tab. */
-export function ExtensionsTab({ cwd, active, t, engine }: TabProps & { engine: 'claude' | 'codex' }) {
+export function ExtensionsTab({ cwd, active, t, engine }: TabProps & { engine: EngineName }) {
   const { info, error: infoError, reload } = useInfo(engine, active ? cwd : undefined)
   const [skills, setSkills] = useState<SkillWire[]>([])
   const [status, setStatus] = useState<{ kind: 'error' | 'ok'; text: string } | undefined>(undefined)

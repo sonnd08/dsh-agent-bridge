@@ -13,6 +13,8 @@ export interface SessionRow {
   readonly cwd: string
   /** Last activity, in epoch milliseconds. */
   readonly updatedAt: number
+  /** Whether a turn is running in this session. */
+  readonly running?: boolean
 }
 
 /** What the page renders: every row and the open one. */

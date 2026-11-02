@@ -26,6 +26,15 @@ test('external rows join the Host list under the ext: prefix and the open one is
   assert.equal(mergeList(hostList, { rows: [] }, false), hostList, 'nothing to merge keeps the snapshot identity')
 })
 
+test('a running external row uses the Host running state and keeps its title', () => {
+  const row = { id: 'claude:a', title: 'alpha', cwd: '/w/alpha', updatedAt: 10 }
+  const merged = mergeList(hostList, { rows: [{ ...row, running: true }, { ...row, id: 'claude:b' }] }, false)
+  assert.equal(merged.byId['ext:claude:a'].running, true)
+  assert.equal(merged.byId['ext:claude:a'].title, 'alpha')
+  assert.equal(merged.byId['ext:claude:a'].displayTitle, 'alpha')
+  assert.equal(merged.byId['ext:claude:b'].running, false)
+})
+
 test('external rows are accounted to the Workspace whose path is their folder', () => {
   const items = [{ path: '/w/alpha', sessionIds: ['session-1'] }, { path: '/w/gamma', sessionIds: [] }]
   const merged = mergeWorkspaces(items, external)

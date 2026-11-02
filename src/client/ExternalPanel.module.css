@@ -735,3 +735,59 @@
 .column button.iconButton:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover);
 }
+
+/* Same measurements as the permission trigger of the DSH composer (ui-permission-presets PermissionSelect). */
+.permissionTrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 220px;
+  height: 28px;
+  padding: 0 4px 0 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm);
+  outline: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.permissionTrigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.permissionTrigger:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+}
+
+.permissionIcon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.permissionIcon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.permissionLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permissionChevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--dsw-alias-label-caption);
+  transition: transform 120ms ease;
+}
+
+.permissionChevronOpen {
+  transform: rotate(180deg);
+}
