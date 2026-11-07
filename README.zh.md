@@ -9,7 +9,7 @@
 ## 功能
 
 - **一个侧边栏管理所有助手。** Claude Code 和 Codex 的会话按项目文件夹列在 DSH 原生的工作区侧边栏里，每一行带一个 Claude 或 Codex 的小标记。
-- **原生的行菜单直接可用。** 置顶、重命名、归档用的都是 DSH 自己的菜单项、图钉标记和改名对话框。重启后置顶和归档都还在。
+- **行菜单直接可用。** 每一行的菜单里有置顶、重命名、归档，用的是 DSH 自己的图钉标记和改名对话框。重启后置顶和归档都还在。
 - **继续任何一个会话。** 打开会话能看到完整对话记录。可以发消息、中断当前这一轮、回答权限确认和提问、选择模型和思考强度、附加图片。Claude 通过 Claude Agent SDK 运行，Codex 通过 `codex app-server` 运行，会话和命令行工具保持互通。
 - **操作和 DSH 一致。** 按 Enter 发送，Shift+Enter 换行。运行中的会话，在会话行里显示 DSH 自带的转圈；回合结束前，你的消息下方会一直显示“工作中，用时 N 秒”。Claude 和 Codex 可以在附件按钮旁的权限菜单里选择默认（每次询问）、只读、工作区可写或完全权限；完全权限要先确认，每种助手分别记住选择，定时消息始终用默认权限。Claude 的思考摘要显示在回复上方，每段思考结束后才出现。
 - **新建会话。** 可以在任意文件夹里开新会话，也可以先克隆一个仓库。
@@ -27,14 +27,15 @@
   - 通过任意兼容 OpenAI 接口的语音服务做语音输入和朗读。
   - 一轮对话结束时发桌面通知。
 - **Pi 会话（默认关闭）。** 打开 `piEnabled` 后，也能列出并继续 Pi 会话。Pi 执行命令和改文件前不会询问，从 DSH 发出的消息会以你当前用户的权限直接执行。只有 Pi 扩展弹出的对话框才会显示成卡片；需要输入文字的对话框会被直接取消。
+- **设置里的 Agent Bridge 页签。** 打开设置 → Agent Bridge，可以看到插件和 DSH 的版本、插件启动的 Claude Code、Codex、Pi 程序及其版本，以及这一版插件已适配的版本。不在适配列表里的版本标为“未验证”，不一定不能用。
 - **兜底不出错。** 如果以后的 DSH 版本改了侧边栏结构，插件接不进去，会话会自动改到一个单独的 "Claude / Codex" 页面里显示，不会弄坏侧边栏。
 
 ## 环境要求
 
-- DeepSeek Harness 0.2.x，桌面端或 `dsh web` 都可以。已在 0.2.1 上测试。
+- DeepSeek Harness 0.2.x，桌面端或 `dsh web` 都可以。已在 0.2.1 和 0.2.2-rc.1 上测试。
 - Node.js 22.19 或更新版本。DSH 自带 Node.js。
-- 已安装并登录 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)。
-- [Codex CLI](https://github.com/openai/codex) 可选，没装就只显示 Claude 的会话。
+- 已安装并登录 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)。已在 2.1.319 上测试。
+- [Codex CLI](https://github.com/openai/codex) 可选，没装就只显示 Claude 的会话。已在 0.165.0 上测试。
 - Pi 可选，已在 1.4.0 上测试。
 - 在 macOS 上开发和测试。Linux 应该可用，Windows 未测试。
 

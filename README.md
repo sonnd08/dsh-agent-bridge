@@ -9,7 +9,7 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 ## Features
 
 - **One sidebar for all your agents.** Claude Code and Codex sessions are listed in the stock DSH Workspace browser under their project folder, with a small Claude or Codex mark on each row.
-- **The stock row menu works on them.** Pin, Rename and Archive use DSH's own menu items, pin indicator and rename dialog. Pins and archives survive restarts.
+- **The row menu works on them.** Pin, Rename and Archive appear in each row's menu and use DSH's own pin indicator and rename dialog. Pins and archives survive restarts.
 - **Continue any session.** Opening a row shows the full transcript. You can send messages, stop a turn, answer permission prompts and questions, pick the model and reasoning effort, and attach images. Claude runs through the Claude Agent SDK and Codex through `codex app-server`, so the sessions stay compatible with the CLIs.
 - **Same controls as DSH.** Enter sends and Shift+Enter starts a new line. A running session shows DSH's own spinner in its row, and a "Working for N s" line stays under your message until the turn ends. For Claude and Codex, the permission menu beside the attach button chooses Default (ask each time), Read Only, Workspace Write or Full Access; Full Access needs confirming first, the choice is kept per engine, and scheduled messages always use Default. Claude's thinking summaries appear above its replies once each thinking block completes.
 - **Start new sessions** in any folder, or clone a repository first.
@@ -27,14 +27,15 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
   - Voice dictation and read-aloud through any OpenAI-compatible speech endpoint.
   - Desktop notifications when a turn ends.
 - **Pi sessions, off by default.** Turn on `piEnabled` to list and continue Pi sessions too. Pi runs commands and edits files without asking, so a message sent from DSH acts with your user's rights. Only dialogs raised by Pi extensions appear as cards; dialogs that need typed text are cancelled.
+- **Agent Bridge settings tab.** Settings → Agent Bridge shows the plugin and DSH versions, the Claude Code, Codex and Pi executables the plugin starts with their versions, and the versions this release was verified with. A version outside that list is marked Not verified; it may still work.
 - **Safe fallback.** If a future DSH release changes the sidebar so the plugin cannot join it, the sessions move to a standalone "Claude / Codex" page instead of breaking the sidebar.
 
 ## Requirements
 
-- DeepSeek Harness 0.2.x, desktop app or `dsh web`. It is tested with 0.2.1.
+- DeepSeek Harness 0.2.x, desktop app or `dsh web`. It is tested with 0.2.1 and 0.2.2-rc.1.
 - Node.js 22.19 or newer. DSH ships its own Node.js.
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), installed and logged in.
-- [Codex CLI](https://github.com/openai/codex) is optional. Without it, only Claude sessions are listed.
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), installed and logged in. Tested with 2.1.319.
+- [Codex CLI](https://github.com/openai/codex) is optional. Without it, only Claude sessions are listed. Tested with 0.165.0.
 - Pi is optional and tested with 1.4.0.
 - Developed and tested on macOS. Linux should work; Windows is untested.
 

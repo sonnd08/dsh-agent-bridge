@@ -291,6 +291,8 @@ export interface FsImageWire { readonly mime: string; readonly base64: string }
 export interface FsBrowseWire { readonly path: string; readonly parent: string | undefined; readonly dirs: readonly string[] }
 
 export const INFO_PATH = '/api/agent-bridge/info'
+/** GET: plugin, dsh and engine versions for the settings tab. */
+export const ABOUT_PATH = '/api/agent-bridge/about'
 export const SEARCH_PATH = '/api/agent-bridge/search'
 export const DRAFT_PATH = '/api/agent-bridge/draft'
 export const CHOICE_PATH = '/api/agent-bridge/choice'
@@ -400,3 +402,31 @@ export type VoiceBodyWire =
 
 /** Whether a speech backend is configured. */
 export interface VoiceStatusWire { readonly enabled: boolean }
+
+/** One engine as the settings tab reports it. */
+export interface EngineAboutWire {
+  readonly engine: EngineName
+  /** Whether the plugin shows and starts this engine's sessions. */
+  readonly enabled: boolean
+  /** Executable the plugin starts, resolved to a path when one was found. */
+  readonly executable: string
+  /** Version the executable reports; absent when it could not run. */
+  readonly version?: string
+  /** First line of the start error when the executable could not run. */
+  readonly error?: string
+  /** Versions this plugin release was verified with. */
+  readonly verified: readonly string[]
+}
+
+/** Response of {@link ABOUT_PATH}. */
+export interface AboutWire {
+  /** Version of this plugin. */
+  readonly plugin: string
+  /** Version of the running dsh app; absent when the host does not report one. */
+  readonly dsh?: string
+  /** dsh versions this plugin release was verified with. */
+  readonly dshVerified: readonly string[]
+  /** Claude Agent SDK version bundled with the plugin. */
+  readonly sdk: string
+  readonly engines: readonly EngineAboutWire[]
+}

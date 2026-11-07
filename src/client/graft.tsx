@@ -49,6 +49,44 @@ export interface GraftSource {
   rename(id: string, title: string): Promise<void>
   /** Main panel id the external session page occupies. */
   readonly panelId: string
+  /**
+   * Open the plugin's context menu on an external row (dsh 0.2.2, whose row menu lives in the context-menu
+   * registry). `mode: 'toggle'` closes the menu when it already shows that row.
+   */
+  readonly openMenu?: (target: ExternalMenuTarget, point: unknown, mode?: unknown) => void
+  /** Filled with the browser's rename request, which raises the shipped rename dialog. */
+  readonly renameRequest?: { current?: ((id: string, title: string) => void) | undefined }
+}
+
+/** Context-menu target family of external rows; the plugin registers its own row actions on it. */
+export const EXTERNAL_MENU_KIND = 'agent-bridge.session'
+
+/** Context-menu target of an external row; `sessionId` carries the browser prefix. */
+export interface ExternalMenuTarget {
+  readonly kind: typeof EXTERNAL_MENU_KIND
+  readonly value: { readonly sessionId: string; readonly displayTitle?: unknown }
+}
+
+type MenuTargetLike = { kind?: unknown; value?: { sessionId?: unknown } & Record<string, unknown> } | undefined
+type TriggerTarget = MenuTargetLike | (() => MenuTargetLike)
+type ContextMenuApi = { getTriggerProps: (target: TriggerTarget, handlers?: unknown) => unknown } & Record<string, unknown>
+
+/**
+ * Send a session target of an external row to the plugin's target family; every other target is returned as given.
+ * @param target - a context-menu target.
+ * @returns the target to open.
+ */
+export function externalMenuTarget(target: MenuTargetLike): MenuTargetLike {
+  if (target?.kind !== 'session' || target.value === undefined || !isExternalId(target.value.sessionId)) return target
+  return { kind: EXTERNAL_MENU_KIND, value: target.value }
+}
+
+function withExternalTriggers(api: ContextMenuApi): ContextMenuApi {
+  return {
+    ...api,
+    getTriggerProps: (target: TriggerTarget, handlers?: unknown) => api.getTriggerProps(
+      typeof target === 'function' ? () => externalMenuTarget(target()) : externalMenuTarget(target), handlers),
+  }
 }
 
 /** One registration as the slot ledger stores it. */
@@ -178,6 +216,9 @@ type BrowserProps = {
   useWorkspaces?: Selector<{ items: readonly WorkspaceLike[]; pinnedSessionIds?: readonly string[] } & Record<string, unknown>>
   usePanelInfo?: Selector<{ activePanelId: string | null } & Record<string, unknown>>
   open?: (id: string) => void
+  openSessionMenu?: (id: string, title: unknown, point: unknown, mode?: unknown) => void
+  useContextMenu?: () => ContextMenuApi
+  requestSessionRename?: (id: string, title: string) => void
 } & Record<string, unknown>
 
 /** Renders `fallback` instead of `children` once `children` threw. */
@@ -201,7 +242,8 @@ function wrapBrowser(Shipped: ComponentType<BrowserProps>, source: GraftSource):
   const getSnapshot = (): GraftSnapshot => source.snapshot.getSnapshot()
   function Merged(props: BrowserProps): ReactNode {
     const external = useSyncExternalStore(subscribe, getSnapshot)
-    const { useSessions, useWorkspaces, usePanelInfo, open } = props
+    const { useSessions, useWorkspaces, usePanelInfo, open, openSessionMenu, useContextMenu, requestSessionRename } = props
+    if (source.renameRequest !== undefined) source.renameRequest.current = requestSessionRename
     const externalShown = usePanelInfo === undefined ? false : usePanelInfo(info => info.activePanelId) === source.panelId
     const merged = useMemo((): BrowserProps => {
       const next: BrowserProps = { ...props }
@@ -225,6 +267,19 @@ function wrapBrowser(Shipped: ComponentType<BrowserProps>, source: GraftSource):
           const info = usePanelInfo(value => value)
           const shown = useMemo(() => info.activePanelId === source.panelId ? { ...info, activePanelId: null } : info, [info])
           return select(shown)
+        }
+      }
+      const openMenu = source.openMenu
+      if (openSessionMenu !== undefined && openMenu !== undefined) {
+        next.openSessionMenu = (id, title, point, mode) => {
+          if (isExternalId(id)) openMenu({ kind: EXTERNAL_MENU_KIND, value: { sessionId: id, displayTitle: title } }, point, mode)
+          else openSessionMenu(id, title, point, mode)
+        }
+      }
+      if (useContextMenu !== undefined && openMenu !== undefined) {
+        next.useContextMenu = () => {
+          const api = useContextMenu()
+          return useMemo(() => withExternalTriggers(api), [api])
         }
       }
       if (open !== undefined) {
@@ -268,16 +323,19 @@ function rowAdapters(source: GraftSource): Record<string, (props: RowProps) => R
     select(useSyncExternalStore(subscribe, () => pinnedSet(source.snapshot.getSnapshot())))
   // Archived external rows are not listed, so every listed row reads as not archived.
   const useArchived = <R,>(select: (set: ReadonlySet<string>) => R): R => select(NO_IDS)
+  // dsh 0.2.2 row buttons also ask the Host whether the session allows the verb; the plugin answers for its own rows.
+  const useSessionAccess = (): boolean => true
   const pin = (props: RowProps): RowProps => ({
     ...props,
     usePinned,
     useArchived,
+    useSessionAccess,
     pinSession: (id: string) => { source.pin(raw(id), true) },
     unpinSession: (id: string) => { source.pin(raw(id), false) },
   })
   return {
     pin,
-    archive: props => ({ ...props, useArchived, archiveSession: (id: string) => { source.archive(raw(id)) }, unarchiveSession: () => {} }),
+    archive: props => ({ ...props, useArchived, useSessionAccess, archiveSession: (id: string) => { source.archive(raw(id)) }, unarchiveSession: () => {} }),
     // The shipped item only raises the rename dialog, which the overlay wrapper routes to the plugin.
     rename: props => props,
   }
@@ -313,15 +371,16 @@ function wrapRenameDialog(Shipped: ComponentType<RowProps>, source: GraftSource)
 
 /**
  * Wrap the shipped browser and its row verbs, now and whenever they register again (hot reload, plugin
- * reload). Returns undefined when the ledger does not look like the dsh 0.2.1 browser.
+ * reload). Returns undefined when the ledger does not look like the dsh 0.2.1 or 0.2.2 browser.
  * @param slots - the client slot registry.
  * @param source - external rows, open action and panel id.
  * @returns disposer restoring every wrapped component, or undefined when the graft does not apply.
  */
 export function graftWorkspaceBrowser(slots: GraftSlots, source: GraftSource): (() => void) | undefined {
   if (typeof slots.entries !== 'function' || typeof slots.subscribe !== 'function') return undefined
+  // dsh 0.2.1 declares the row menu under the browser; 0.2.2 moved it to the context-menu registry and keeps the row actions.
   const isShippedBrowser = (entry: LedgerEntry): boolean =>
-    typeof entry.component === 'function' && entry.children?.[MENU_SLOT] !== undefined
+    typeof entry.component === 'function' && (entry.children?.[MENU_SLOT] !== undefined || entry.children?.[ACTION_SLOT] !== undefined)
   if (!slots.entries(BROWSER_SLOT).some(isShippedBrowser)) return undefined
   const adapters = rowAdapters(source)
   const restore = new Map<LedgerEntry, unknown>()

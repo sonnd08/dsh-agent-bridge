@@ -123,3 +123,25 @@ test('the shipped browser and Host row entries are wrapped, later registrations 
   assert.equal(dialog.component, Dialog)
   assert.equal(later.component, original)
 })
+
+test('the dsh 0.2.2 browser, whose row menu moved out of it, is grafted and its row buttons work on external rows', () => {
+  const Browser = () => null
+  const Pin = () => null
+  const Archive = () => null
+  const browser = { component: Browser, children: { 'sidebar.workspaces.session.row.action': {}, 'sidebar.session.row.hover': {} } }
+  const pin = { component: Pin, options: { id: 'pin' } }
+  const archive = { component: Archive, options: { id: 'archive' } }
+  const slots = fakeSlots({ 'sidebar.workspaces': [browser], 'sidebar.workspaces.session.row.action': [pin, archive] })
+  const undo = graftWorkspaceBrowser(slots, source)
+  assert.equal(typeof undo, 'function', 'the 0.2.2 browser is recognized')
+  assert.notEqual(browser.component, Browser)
+  const hostAccess = () => false
+  const pinProps = pin.component({ sessionId: 'ext:claude:a', useSessionAccess: hostAccess }).props
+  assert.equal(pinProps.useSessionAccess('ext:claude:a', 'workspace/pinSession'), true, 'an external row is not hidden by the Host access check')
+  const archiveProps = archive.component({ sessionId: 'ext:claude:a', useSessionAccess: hostAccess }).props
+  archiveProps.archiveSession('ext:claude:a')
+  assert.deepEqual(calls.splice(0), [['archive', 'claude:a']])
+  assert.equal(pin.component({ sessionId: 'session-1', useSessionAccess: hostAccess }).props.useSessionAccess, hostAccess, 'a Host row keeps the Host check')
+  undo()
+  assert.equal(browser.component, Browser)
+})

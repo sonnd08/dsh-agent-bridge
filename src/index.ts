@@ -23,6 +23,7 @@ import { readTasks, tasksAction } from './taskmaster.ts'
 import { voiceAction } from './voice.ts'
 import { watchStream } from './watch.ts'
 import { resolveCommand } from './commands.ts'
+import { readAbout } from './about.ts'
 import { claudePermission, codexPermission, parsePreset } from './permissions.ts'
 import { startHeapWatch } from './diagnostics.ts'
 import { createSingleFlight } from './single-flight.ts'
@@ -32,7 +33,7 @@ import {
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  ANSWER_PATH, ARCHIVE_PATH, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -569,6 +570,7 @@ export function apply(ctx: Context, config: Config): void {
     if (Date.now() - cached.at >= 20_000) load(false).catch(() => { /* the old answer stays until a load succeeds */ })
     return json(cached.info)
   }, 'info')
+  route(ABOUT_PATH, async (_request, settings) => json(await readAbout(settings)), 'about')
   route(SEARCH_PATH, async (request, settings) => {
     const term = query(request, 'q').trim()
     if (term.length < 2) return json({ hits: [] })

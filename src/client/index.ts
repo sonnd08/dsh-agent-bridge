@@ -20,12 +20,13 @@ import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
 import { createSessionsStore, type SessionRow } from './sessions.ts'
 import { ExternalPanel } from './ExternalPanel.tsx'
-import { EngineMark, graftWorkspaceBrowser, type GraftSlots } from './graft.tsx'
+import { EngineMark, EXTERNAL_MENU_KIND, EXTERNAL_PREFIX, graftWorkspaceBrowser, type ExternalMenuTarget, type GraftSlots } from './graft.tsx'
 import { createModeStore, withMode } from './mode.tsx'
 import { SessionsPage } from './SessionsPage.tsx'
 import { SettingsCard, type ExternalEnginesSection } from './SettingsCard.tsx'
+import { AboutSection } from './AboutSection.tsx'
 import { en, NS, zh, type ExternalEnginesKey } from './locales.ts'
-import { createTranscriptController } from './transcript.ts'
+import { createTranscriptController, isDraft } from './transcript.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -41,6 +42,30 @@ export const inject = ['slots', 'locale', 'layout', 'configForms', 'uiWorkspace'
 const ENTRY_ID = 'agent-bridge'
 /** Package name keying the bundle's configuration page on the Plugins page. */
 const PACKAGE_NAME = 'dsh-agent-bridge'
+
+/** One action a context-menu contribution resolves to (dsh 0.2.2 `ui-context-menu`). */
+interface MenuAction {
+  readonly id: string
+  readonly label: string
+  readonly icon?: { readonly key: string }
+  readonly separatorBefore?: boolean
+  readonly run: () => void
+}
+
+/** The part of the dsh 0.2.2 `contextMenus` service the plugin uses; older dsh builds have no such service. */
+interface ContextMenus {
+  register(contribution: {
+    id: string
+    target: string
+    order: number
+    observe?: () => readonly unknown[]
+    /** Receives the target's value, as `open` captured it. */
+    resolve: (value: ExternalMenuTarget['value']) => readonly MenuAction[]
+  }): () => void
+  open(target: ExternalMenuTarget, point: unknown): void
+  close(): void
+  readonly active: { getSnapshot(): { kind?: string; value?: { sessionId?: unknown } } | null | undefined }
+}
 
 function toRow(wire: SessionRowWire): SessionRow {
   return { id: wire.id, title: wire.title, cwd: wire.cwd, updatedAt: wire.updatedAt }
@@ -174,6 +199,14 @@ export function apply(ctx: ClientContext): void {
   // The shipped Workspace browser has no external session source; the hub bundle's build adds one.
   const registerSource = (ctx.uiWorkspace as { registerSessionSource?: (source: ExternalSessionSource) => () => void })
     .registerSessionSource
+  let contextMenus: ContextMenus | undefined
+  const renameRequest: { current?: ((id: string, title: string) => void) | undefined } = {}
+  const openMenu = (target: ExternalMenuTarget, point: unknown, mode?: unknown): void => {
+    if (contextMenus === undefined) return
+    const active = contextMenus.active.getSnapshot()
+    if (mode === 'toggle' && active?.kind === target.kind && active.value?.sessionId === target.value.sessionId) contextMenus.close()
+    else contextMenus.open(target, point)
+  }
   // Where the rows live: the hub's session source, the shipped browser grafted in place, or our own page.
   const mode = createModeStore(typeof registerSource === 'function' ? 'browser' : 'page')
   if (mode.getSnapshot() === 'browser') {
@@ -185,7 +218,7 @@ export function apply(ctx: ClientContext): void {
       let removeEntry: (() => void) | undefined
       const tryGraft = (): void => {
         if (undo !== undefined) return
-        undo = graftWorkspaceBrowser(graftSlots, { snapshot: store, open, pin: pinRow, archive: archiveRow, rename: renameRow, panelId: PANEL_ID })
+        undo = graftWorkspaceBrowser(graftSlots, { snapshot: store, open, pin: pinRow, archive: archiveRow, rename: renameRow, panelId: PANEL_ID, openMenu, renameRequest })
         if (undo === undefined) return
         removeEntry?.()
         removeEntry = undefined
@@ -237,6 +270,43 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: () => ({ hooks: { scope }, save: async (field: string, value: unknown) => { await scope.set(field, value) } }),
   }, SettingsCard)), 'agent-bridge: configuration page')
+  ctx.effect(() => slots.inject('settings.section', () => slots.register({
+    name: 'settings.section',
+    id: 'agent-bridge',
+    order: 30,
+    label: () => t('about.nav'),
+    locale: NS,
+  }, AboutSection)), 'agent-bridge: settings tab')
+  // dsh 0.2.2 resolves the row menu from the context-menu registry; external rows open the plugin's own target family there.
+  ctx.inject(['contextMenus'] as never, (menuCtx: ClientContext) => {
+    const menus = (menuCtx as unknown as { contextMenus: ContextMenus }).contextMenus
+    contextMenus = menus
+    menuCtx.effect(() => () => { if (contextMenus === menus) contextMenus = undefined }, 'agent-bridge: context menu service')
+    const rowOf = (value: ExternalMenuTarget['value']): string | undefined => {
+      const raw = value.sessionId.slice(EXTERNAL_PREFIX.length)
+      return isDraft(raw) ? undefined : raw
+    }
+    const action = (id: string, order: number, resolve: (value: ExternalMenuTarget['value'], raw: string) => readonly MenuAction[]): void => {
+      menuCtx.effect(() => menus.register({
+        id: `agent-bridge.${id}`, target: EXTERNAL_MENU_KIND, order,
+        observe: () => [store, ctx.locale],
+        resolve: (value) => {
+          const raw = rowOf(value)
+          return raw === undefined ? [] : resolve(value, raw)
+        },
+      }), `agent-bridge: ${id} row menu`)
+    }
+    action('pin', 100, (_value, raw) => {
+      const isPinned = pinned.includes(raw)
+      return [{ id: 'pin', label: t(isPinned ? 'menu.unpin' : 'menu.pin'), icon: { key: isPinned ? 'workspace.unpin' : 'workspace.pin' }, run: () => { pinRow(raw, !isPinned) } }]
+    })
+    action('rename', 200, (value) => {
+      const request = renameRequest.current
+      if (request === undefined) return []
+      return [{ id: 'rename', label: t('menu.rename'), icon: { key: 'workspace.rename' }, run: () => { request(value.sessionId, String(value.displayTitle ?? '')) } }]
+    })
+    action('archive', 600, (_value, raw) => [{ id: 'archive', label: t('menu.archive'), icon: { key: 'workspace.archive' }, separatorBefore: true, run: () => { archiveRow(raw) } }])
+  })
   ctx.effect(() => () => { transcript.close() }, 'agent-bridge: transcript teardown')
   // Re-list when the row limit changes and when the tab becomes visible again (sessions created in a terminal).
   let lastLimit = scope.getSnapshot().value?.sessionLimit

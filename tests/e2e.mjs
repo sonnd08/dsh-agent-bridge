@@ -426,6 +426,8 @@ await step('Workspace browser row menu: pin, rename and archive act on a Claude 
   const menu = async (row, item) => {
     await row.hover()
     await row.locator('button[aria-label]').first().click()
+    // dsh 0.2.2 shows the menu only once every contribution has resolved.
+    await page.locator('[role="menu"] button').first().waitFor({ timeout: 10000 })
     const labels = await page.locator('[role="menu"] button').allTextContents()
     await page.locator('[role="menu"] button').filter({ hasText: item }).first().click()
     return labels.map(text => text.replace(/[⌥⌘⇧].*$/, '').trim())
@@ -456,6 +458,24 @@ await step('Workspace browser row menu: pin, rename and archive act on a Claude 
     method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, archived: false }),
   })).status, key.slice('session:ext:'.length))
   assert(restore === 200, `restoring the archived row answered ${restore}`)
+})
+
+await step('the settings dialog has an Agent Bridge tab listing dsh and the engines with their verified versions', async () => {
+  await dismissOverlays()
+  await page.getByRole('button', { name: 'Account menu' }).click()
+  await page.getByRole('menuitem', { name: /Settings/ }).first().click()
+  await page.getByRole('dialog').getByText('Agent Bridge', { exact: true }).first().click({ timeout: 10000 })
+  const section = page.locator('[data-testid="about-section"]')
+  await section.locator('[data-testid="about-claude"]').waitFor({ timeout: 20000 })
+  const ids = await section.locator('li[data-testid^="about-"]').evaluateAll(items => items.map(item => item.dataset.testid))
+  assert(ids.join() === 'about-dsh,about-claude,about-codex,about-pi', `rows: ${ids.join()}`)
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert((await section.textContent()).includes(pkg.version), 'the plugin version is shown')
+  const dshStatus = await section.locator('[data-testid="about-dsh"]').getAttribute('data-status')
+  assert(dshStatus === 'verified', `the dsh row reads ${dshStatus}`)
+  assert((await section.locator('[data-testid="about-claude"]').textContent()).includes('fake-claude.py'), 'the Claude row names the configured executable')
+  await section.screenshot({ path: `${EVIDENCE}about-tab.png` })
+  await page.keyboard.press('Escape')
 })
 
 await step('no uncaught page errors', async () => {

@@ -533,6 +533,10 @@ await step('send keys match the DSH composer: Enter sends, Shift+Enter breaks th
     await page.keyboard.press('Enter')
     await page.waitForFunction(() => document.querySelector('[data-testid="ext-input"]')?.value === '', undefined, { timeout: 10000 })
     assert(await tid('ext-pending').filter({ hasText: 'entersent' }).count() > 0 || await page.getByText('entersent').count() > 0, 'plain Enter should send the message')
+    // Keep record mode until the turn has reached the fake; a turn started after the mode file is gone runs the real Claude on the fixture.
+    const deadline = Date.now() + 30000
+    while (fakeLog().length === 0 && Date.now() < deadline) await page.waitForTimeout(300)
+    assert(fakeLog().length > 0, 'the sent turn never reached the Claude executable')
   } finally { rmSync(MODE, { force: true }) }
 })
 

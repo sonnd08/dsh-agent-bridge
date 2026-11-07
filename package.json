@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Use Claude Code, Codex and, optionally, Pi sessions inside DeepSeek Harness: list, open, continue, pin, rename and archive them in the DSH Workspace browser.",
   "keywords": [
     "deepseek-harness",
