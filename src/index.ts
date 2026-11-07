@@ -25,6 +25,7 @@ import { watchStream } from './watch.ts'
 import { resolveCommand } from './commands.ts'
 import { claudePermission, codexPermission, parsePreset } from './permissions.ts'
 import { startHeapWatch } from './diagnostics.ts'
+import { createSingleFlight } from './single-flight.ts'
 import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig } from './extras.ts'
 import {
   browseDirs, fsAction, gitClone, gitWorktreeAction, gitWorktrees, readImage,
@@ -363,15 +364,18 @@ export function apply(ctx: Context, config: Config): void {
     return json({ sessions: rows, running, pinned: store.get('pinned'), defaultCwd: homedirOf(settings), codexEnabled: settings.codexEnabled, // A bare name means the command was not found, so no new-session entry is offered.
       piEnabled: settings.piEnabled && settings.piExecutable.includes('/'), warnings })
   }, 'sessions')
+  // A transcript can be tens of megabytes; requests that arrive while it is being read share that read.
+  const sessionReads = createSingleFlight<SessionWire>()
   route(SESSION_PATH, async (request) => {
     const parsed = idOf(request)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
     const driver = driverOf(parsed.engine)
-    const goal = await driver.readGoal(parsed.raw)
-    const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw) : parsed.engine === 'pi' ? await readPiUsage(parsed.raw) : undefined
-    const page = await driver.readMessages(parsed.raw)
-    const body: SessionWire = { messages: page.messages, ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
-    return json(body)
+    return json(await sessionReads.run(`${parsed.engine}:${parsed.raw}`, async () => {
+      const goal = await driver.readGoal(parsed.raw)
+      const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw) : parsed.engine === 'pi' ? await readPiUsage(parsed.raw) : undefined
+      const page = await driver.readMessages(parsed.raw)
+      return { messages: page.messages, ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
+    }))
   }, 'session')
   route(WATCH_PATH, (request, settings) => watchResponse(request, settings.watchIntervalMs, driverOf), 'watch')
   route(LIVE_PATH, request => liveResponse(request, driverOf), 'live')

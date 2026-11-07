@@ -24,6 +24,8 @@ export interface GraftRow {
   readonly title: string
   readonly cwd: string
   readonly updatedAt: number
+  /** Whether a turn is running; the browser then shows its own running state in the row. */
+  readonly running?: boolean
 }
 
 /** Rows, the pinned rows, and the row the external panel shows. */

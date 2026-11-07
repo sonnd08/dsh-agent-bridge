@@ -22,6 +22,8 @@ export interface TranscriptState {
   readonly partial: string
   /** Prompt just sent and not yet in the file. */
   readonly pendingUser?: string | undefined
+  /** When this browser sent the running turn, in epoch milliseconds; unknown for a turn started elsewhere. */
+  readonly startedAt?: number | undefined
   readonly permissions: readonly PermissionWire[]
   /** Active /goal read from the transcript file. */
   readonly goal?: GoalWire | undefined
@@ -141,6 +143,29 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
     patch({ status: 'ready', messages: body.messages, goal: body.goal, usage: body.usage, recentTurns: body.recentTurns, ...written ? { pendingUser: undefined } : {} })
     return true
   }
+  // At most one transcript request runs; refreshes asked for meanwhile collapse into one more request after it.
+  let refreshing: { mine: number; again: boolean; done: Promise<boolean> } | undefined
+  const refresh = (id: string, mine: number): Promise<boolean> => {
+    if (refreshing?.mine === mine) {
+      refreshing.again = true
+      return refreshing.done
+    }
+    const current = { mine, again: false, done: Promise.resolve(false) }
+    current.done = (async () => {
+      try {
+        let ok: boolean
+        do {
+          current.again = false
+          ok = await fetchMessages(id, mine)
+        } while (current.again && mine === generation)
+        return ok
+      } finally {
+        if (refreshing === current) refreshing = undefined
+      }
+    })()
+    refreshing = current
+    return current.done
+  }
   const startWatch = (id: string, mine: number): void => {
     watch?.close()
     const opened = new EventSource(`${WATCH_PATH}${query(id)}`)
@@ -151,7 +176,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
   }
   const settle = async (id: string, mine: number): Promise<void> => {
     try {
-      if (await fetchMessages(id, mine)) startWatch(id, mine)
+      if (await refresh(id, mine)) startWatch(id, mine)
     } catch (error) {
       console.warn('agent-bridge: transcript load failed', error)
     }
@@ -166,7 +191,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
       switch (event.kind) {
         case 'idle':
           if (state.running) {
-            patch({ running: false, partial: '', pendingUser: undefined, permissions: [] })
+            patch({ running: false, partial: '', pendingUser: undefined, startedAt: undefined, permissions: [] })
             hooks.onTurnEnded()
             void settle(id, mine)
           }
@@ -176,7 +201,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
           break
         case 'message':
           patch({ running: true, partial: '' })
-          void fetchMessages(id, mine).catch(() => {})
+          void refresh(id, mine).catch(() => {})
           break
         case 'permission':
           patch({ running: true, permissions: [...state.permissions.filter(p => p.requestId !== event.permission.requestId), event.permission] })
@@ -186,7 +211,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
           break
         case 'ended':
           patch({
-            running: false, partial: '', pendingUser: undefined, permissions: [],
+            running: false, partial: '', pendingUser: undefined, startedAt: undefined, permissions: [],
             ...event.status === 'error' ? { error: event.error ?? 'error' } : {},
           })
           hooks.onTurnEnded()
@@ -206,7 +231,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
     }
     publish({ ...IDLE, status: 'loading', sessionId: id })
     startLive(id, mine)
-    void fetchMessages(id, mine)
+    void refresh(id, mine)
       .then((ok) => { if (ok) startWatch(id, mine) })
       .catch((error: unknown) => {
         if (mine !== generation) return
@@ -235,7 +260,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
       if (current === undefined || state.running) return
       const draft = isDraft(current)
       pendingBase = state.messages.length
-      patch({ running: true, pendingUser: text, partial: '', error: undefined })
+      patch({ running: true, pendingUser: text, startedAt: Date.now(), partial: '', error: undefined })
       try {
         const body: SendBodyWire = { ...draft ? { text, cwd, engine: engineOfSession(current) } : { id: current, text, ...cwd === '' ? {} : { cwd } }, ...extras }
         const response = await post(SEND_PATH, body)
@@ -251,7 +276,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
           }
         }
       } catch (error) {
-        patch({ running: false, pendingUser: undefined, error: error instanceof Error ? error.message : String(error) })
+        patch({ running: false, pendingUser: undefined, startedAt: undefined, error: error instanceof Error ? error.message : String(error) })
       }
     },
     async answer(requestId, behavior, answers, remember) {

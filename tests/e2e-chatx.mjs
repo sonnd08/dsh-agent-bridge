@@ -400,10 +400,21 @@ await step('a running turn is marked in the tree, and its end raises a notificat
       return row === undefined ? null : { spinning: row.querySelector('svg[data-state="ongoing"]') !== null, marker: /▶/.test(row.textContent ?? ''), mark: row.querySelector('[data-engine]') !== null }
     }
     await page.waitForFunction(`(${gammaRow})()?.spinning === true`, null, { timeout: 15000 })
+    const working = tid('ext-working')
+    await working.waitFor({ timeout: 5000 })
+    const order = await page.evaluate(() => {
+      const user = [...document.querySelectorAll('ol[class*="messages"] > li')].at(-1)
+      const row = document.querySelector('[data-testid="ext-working"]')
+      return user ? Boolean(user.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) : 'no user row'
+    })
+    assert(order === true, `the working row should follow the sent message, got ${order}`)
+    assert(/^(Working for \d+s ···|工作中，用时 \d+秒 ···)$/.test((await working.locator('[class*="workingText"]').textContent()) ?? ''), `unexpected working label: ${await working.textContent()}`)
+    assert(await working.locator('[data-engine="claude"]').count() === 1, 'the working row should carry the Claude mark')
     const during = await page.evaluate(gammaRow)
     assert(!during.marker, 'a running row should not carry a marker in its title')
     assert(!during.mark, 'a running row should show the status in the mark cell, as a DSH row does')
     await page.waitForFunction(`(${gammaRow})()?.spinning === false`, null, { timeout: 30000 })
+    assert(await tid('ext-working').count() === 0, 'the working row should go away when the turn ends')
     assert((await page.evaluate(gammaRow)).mark, 'the engine mark should return when the turn ends')
     const notes = await page.evaluate(() => window.__notes)
     assert(notes.some(([title]) => /gamma/.test(title)), `no notification for the finished turn: ${JSON.stringify(notes)}`)

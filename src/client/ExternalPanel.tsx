@@ -11,6 +11,7 @@ import { buildTimeline } from './timeline.ts'
 import { AttachmentChips, ComposerBar, SlashMenu, toAttachments, useChoice } from './ComposerBar.tsx'
 import { useInfo } from './info.ts'
 import { SpeakButton, useVoiceEnabled } from './voice.tsx'
+import { RunningStatus } from './RunningStatus.tsx'
 import { ScheduleBar } from './ScheduleBar.tsx'
 import { SearchBox } from './SearchBox.tsx'
 import { DirPicker } from './DirPicker.tsx'
@@ -366,6 +367,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
           {transcript.permissions.map(permission => (
             <PermissionCard key={permission.requestId} permission={permission} controller={controller} alwaysAllow={alwaysAllow} engine={engine} t={t} />
           ))}
+          {transcript.running && <RunningStatus engine={engine} startedAt={transcript.startedAt} t={t} />}
           {transcript.error !== undefined && <p className={css.error} data-testid="ext-error" role="alert">{transcript.error}</p>}
         </div>
         <div className={css.composer} data-testid="ext-composer">
