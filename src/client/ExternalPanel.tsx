@@ -1,15 +1,24 @@
 /** Main panel shown while an external session is selected. */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button, Menu, MenuItemButton, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { DRAFT_PATH, engineOfSession, type AttachmentWire, type EngineName, type PermissionWire } from '../protocol.ts'
+import { draftIdFor, DRAFT_PATH, engineOfSession, providerEngine, providerInstance, providerOfSession, type AttachmentWire, type EngineName, type PermissionPreset, type PermissionWire } from '../protocol.ts'
+import { engineGroup } from './NewChat.tsx'
+import { engineLabels, fastTierOf, speedFor } from './model-names.ts'
+import { bridgeAccessOptions, PermissionPicker, PermissionPopover } from './PermissionPicker.tsx'
+import { useModelPrefs } from './model-prefs-store.ts'
+import { enginePrefs, isEngineEnabled, orderRows, pickEffort, toggleFavorite } from '../model-prefs.ts'
+import { ProviderPicker, type PickerEngine } from './ProviderPicker.tsx'
 import { isDraft, type TranscriptController, type TranscriptState } from './transcript.ts'
 import type { SessionsSnapshot } from './sessions.ts'
 import { IconAlarm, IconArchive, IconBranch, IconCopy, IconEdit, IconMore, IconSearch, IconTrash } from './icons.tsx'
 import { Markdown, Thinking, Todos, ToolCard } from './ToolCard.tsx'
 import { buildTimeline } from './timeline.ts'
-import { AttachmentChips, ComposerBar, SlashMenu, toAttachments, useChoice } from './ComposerBar.tsx'
-import { useInfo } from './info.ts'
+import { AttachmentChips, ComposerBar, SlashMenu, toAttachments, useChoices } from './ComposerBar.tsx'
+import { useInfos } from './info.ts'
+import { useProviders } from './providers-store.ts'
+import { useDshCatalog } from './dsh-catalog-store.ts'
+import { visibleRows } from './model-names.ts'
 import { SpeakButton, useVoiceEnabled } from './voice.tsx'
 import { RunningStatus } from './RunningStatus.tsx'
 import { ScheduleBar } from './ScheduleBar.tsx'
@@ -23,6 +32,18 @@ import { TerminalTab } from './workbench/Terminal.tsx'
 import css from './ExternalPanel.module.css'
 
 /** Registrant-private share arriving through the register inject factory. */
+/** A message that moves an open conversation to a new DSH session. */
+export interface DshSwitchRequest {
+  readonly fromId: string
+  /** Title of the conversation, which the new session keeps. */
+  readonly title: string
+  readonly text: string
+  readonly cwd: string
+  /** `provider/model` of the DSH catalog. */
+  readonly modelId: string
+  readonly effort: string
+}
+
 export type ExternalPanelInjected = {
   hooks: {
     /** Rows and selection of the Claude / Codex page. */
@@ -32,6 +53,8 @@ export type ExternalPanelInjected = {
   }
   /** Actions on the selected session. */
   controller: TranscriptController
+  /** Start a DSH session from the conversation; resolves to an error text, if any. */
+  startDshSession: (request: DshSwitchRequest) => Promise<string | undefined>
   /** Working directory offered for a new session. */
   getDefaultCwd: () => string
   /** Adds a tool to the permanent allow list. */
@@ -40,6 +63,8 @@ export type ExternalPanelInjected = {
   clearSelection: () => void
   /** Open another external session (a search result). */
   openSession: (id: string) => void
+  codexEnabled: () => boolean
+  openSettings: (() => void) | undefined
   /** Working directory requested for the next new session (consumed once), for example from a worktree. */
   takePendingCwd: () => string | undefined
   /** The core sidebar column, which the page hides while it shows its own session list. */
@@ -138,7 +163,7 @@ function PermissionCard({ permission, controller, alwaysAllow, engine, t }: {
  * @param props - locale seat, bound hooks, and callbacks.
  * @returns the panel.
  */
-export function ExternalPanel({ t, useSelection, useTranscript, controller, getDefaultCwd, alwaysAllow, clearSelection, openSession, takePendingCwd }: ExternalPanelProps) {
+export function ExternalPanel({ t, useSelection, useTranscript, controller, startDshSession, getDefaultCwd, alwaysAllow, clearSelection, openSession, takePendingCwd, codexEnabled, openSettings }: ExternalPanelProps) {
   const selected = useSelection(snapshot => snapshot.rows.find(row => row.id === snapshot.selectedId))
   const transcript = useTranscript(state => state)
   const [text, setText] = useState('')
@@ -165,9 +190,51 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
   }, [])
   const draft = isDraft(transcript.sessionId)
   const shownCwd = cwd ?? getDefaultCwd()
-  const engine = engineOfSession(transcript.sessionId)
-  const { info } = useInfo(engine, draft ? shownCwd : selected?.cwd)
-  const [choice, setChoice] = useChoice(engine)
+  const sessionEngine = engineOfSession(transcript.sessionId)
+  const sessionProvider = providerOfSession(transcript.sessionId)
+  // A provider picked in an open session applies to the next message, which moves the conversation there.
+  const [switchTarget, setSwitchTarget] = useState<string | undefined>(undefined)
+  // A DSH model picked in an open session applies to the next message, which starts a new DSH session.
+  const [dshTarget, setDshTarget] = useState<{ readonly modelId: string; readonly effort: string } | undefined>(undefined)
+  useEffect(() => { setSwitchTarget(undefined); setDshTarget(undefined) }, [transcript.sessionId])
+  const provider = switchTarget ?? sessionProvider
+  const engine: EngineName = providerEngine(provider)
+  const pickerCwd = draft ? shownCwd : selected?.cwd
+  const [modelPrefs, saveModelPrefs] = useModelPrefs()
+  const { providers } = useProviders()
+  const offeredProviders = providers.filter(item => (item.engine !== 'codex' || codexEnabled()) && (item.id === provider || isEngineEnabled(modelPrefs, item.id)))
+  const providerIds = [...new Set([provider, ...offeredProviders.map(item => item.id)])]
+  const infos = useInfos(providerIds, pickerCwd)
+  const info = infos[provider]?.info
+  const choices = useChoices(providerIds)
+  const [choice, setChoice] = choices[provider] ?? [{ model: '', effort: '' }, () => {}]
+  const dshCatalog = useDshCatalog()
+  const dshRow = dshTarget === undefined ? undefined : dshCatalog.find(model => model.id === dshTarget.modelId)
+  const pickProvider = (target: PickerEngine, modelId: string, explicit: string | undefined): void => {
+    if (target === 'dsh') {
+      const efforts = dshCatalog.find(model => model.id === modelId)?.efforts.map(level => level.id) ?? []
+      const picked = pickEffort(modelPrefs, { key: `${pickerCurrent.engine}/${pickerCurrent.modelId}`, effort: pickerCurrent.effort }, { key: `dsh/${modelId}`, efforts }, explicit)
+      if (picked.prefs !== modelPrefs) saveModelPrefs(picked.prefs)
+      setSwitchTarget(undefined)
+      setDshTarget({ modelId, effort: picked.effort })
+      return
+    }
+    setDshTarget(undefined)
+    const entry = choices[target]
+    if (entry === undefined) return
+    const [current, set] = entry
+    const targetInfo = infos[target]?.info
+    const supported = targetInfo?.models.find(model => model.value === modelId)?.efforts ?? []
+    const picked = pickEffort(modelPrefs, { key: `${pickerCurrent.engine}/${pickerCurrent.modelId}`, effort: pickerCurrent.effort }, { key: `${target}/${modelId}`, efforts: supported }, explicit)
+    if (picked.prefs !== modelPrefs) saveModelPrefs(picked.prefs)
+    const speed = speedFor(targetInfo, modelId, current.speed)
+    set({ ...current, model: modelId, effort: picked.effort, ...speed === undefined ? {} : { speed } })
+    if (!draft) setSwitchTarget(target === sessionProvider ? undefined : target)
+    else if (target !== sessionProvider) openSession(draftIdFor(target))
+  }
+  const pickerLabels = engineLabels(provider, info, choice)
+  const pickerCurrent = dshTarget === undefined ? { engine: provider, modelId: pickerLabels.modelId, effort: pickerLabels.effortId } : { engine: 'dsh', modelId: dshTarget.modelId, effort: dshTarget.effort }
+  const fastTier = fastTierOf(info, pickerLabels.modelId)
   const [attachments, setAttachments] = useState<AttachmentWire[]>([])
   const [draftLoaded, setDraftLoaded] = useState<string | undefined>(undefined)
   // Text typed while the saved draft is loading is kept instead of being replaced by it.
@@ -193,7 +260,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
     return () => { window.clearTimeout(timer) }
   }, [text, transcript.sessionId, draftLoaded])
   const attach = (files: File[]): void => { void toAttachments(files).then((added) => { setAttachments(current => [...current, ...added]) }) }
-  const canSend = (text.trim() !== '' || attachments.length > 0) && !transcript.running && (!draft || shownCwd !== '')
+  const canSend = (text.trim() !== '' || attachments.length > 0) && !transcript.running && (!draft || shownCwd !== '') && (dshTarget === undefined || attachments.length === 0)
   const voice = useVoiceEnabled()
   const [tab, setTab] = useState<'chat' | 'terminal' | 'files' | 'git' | 'tasks' | 'extensions'>('chat')
   const [visited, setVisited] = useState<ReadonlySet<string>>(new Set())
@@ -208,14 +275,29 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
   const send = (): void => {
     if (!canSend) return
     const message = text.trim() === '' ? t('composer.seeAttached') : text.trim()
+    if (dshTarget !== undefined && transcript.sessionId !== undefined) {
+      const fromId = transcript.sessionId
+      setText('')
+      void startDshSession({ fromId, title: selected?.title ?? '', text: message, cwd: selected?.cwd ?? shownCwd, modelId: dshTarget.modelId, effort: dshTarget.effort }).then((failure) => {
+        if (failure === undefined) {
+          void fetch(DRAFT_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: fromId, text: '' }) }).catch(() => {})
+          return
+        }
+        setText(message)
+        controller.fail(failure)
+      })
+      return
+    }
     const sent = attachments
     following.current = true
     setText('')
     setAttachments([])
     void controller.send(message, draft ? shownCwd : selected?.cwd ?? shownCwd, {
-      ...choice.model === '' ? {} : { model: choice.model }, ...choice.effort === '' ? {} : { effort: choice.effort },
+      ...choice.model === '' ? {} : { model: choice.model }, ...pickerLabels.effortId === '' ? {} : { effort: pickerLabels.effortId },
       ...choice.permission === undefined || choice.permission === '' ? {} : { permission: choice.permission },
       ...sent.length === 0 ? {} : { attachments: sent },
+      ...choice.speed === undefined ? {} : { speed: choice.speed },
+      ...switchTarget === undefined || draft || transcript.sessionId === undefined ? {} : { engine: providerEngine(switchTarget), ...providerInstance(switchTarget) === undefined ? {} : { instance: providerInstance(switchTarget) as string }, switchFrom: transcript.sessionId },
     })
   }
   const tabs = workCwd !== undefined && workCwd !== '' ? (['chat', 'terminal', 'files', 'git', 'tasks', 'extensions'] as const) : undefined
@@ -269,7 +351,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
                   <MenuItemButton icon={<IconEdit size={16} />} onSelect={() => { setMenuOpen(false); setRenaming(selected?.title ?? '') }}>{t('manage.rename')}</MenuItemButton>
                 </div>
                 <div data-testid="ext-fork">
-                  <MenuItemButton icon={<IconBranch size={16} />} disabled={transcript.running} onSelect={() => { setMenuOpen(false); void controller.manage('fork', `${selected?.title ?? ''} (fork)`) }}>{t('manage.fork')}</MenuItemButton>
+                  <MenuItemButton icon={<IconBranch size={16} />} disabled={selected === undefined || (transcript.running && engineOfSession(selected.id) === 'pi')} onSelect={() => { setMenuOpen(false); if (selected !== undefined) void controller.fork(selected.id, `${selected.title} (fork)`, selected.cwd) }}>{t('manage.fork')}</MenuItemButton>
                 </div>
                 <div data-testid="ext-archive">
                   <MenuItemButton icon={<IconArchive size={16} />} disabled={transcript.running} onSelect={() => { setMenuOpen(false); void controller.archive() }}>{t('manage.archive')}</MenuItemButton>
@@ -303,7 +385,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
           {visited.has('files') && <div className={css.pane} hidden={tab !== 'files'}><FilesTab cwd={workCwd} active={tab === 'files'} t={t} /></div>}
           {visited.has('git') && <div className={css.pane} hidden={tab !== 'git'}><GitTab cwd={workCwd} active={tab === 'git'} t={t} /></div>}
           {visited.has('tasks') && <div className={css.pane} hidden={tab !== 'tasks'}><TasksTab cwd={workCwd} active={tab === 'tasks'} t={t} /></div>}
-          {visited.has('extensions') && <div className={css.pane} hidden={tab !== 'extensions'}><ExtensionsTab cwd={workCwd} active={tab === 'extensions'} t={t} engine={engine} /></div>}
+          {visited.has('extensions') && <div className={css.pane} hidden={tab !== 'extensions'}><ExtensionsTab cwd={workCwd} active={tab === 'extensions'} t={t} engine={sessionEngine} /></div>}
         </div>
       )}
       <section
@@ -331,7 +413,9 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
           {transcript.recentTurns !== undefined && <p className={css.summary} data-testid="ext-recent-turns">{t('panel.recentTurns', { n: transcript.recentTurns })}</p>}
           <ol ref={listRef} className={css.messages}>
             {timeline.map(message => (
-              <li key={message.id} className={message.role === 'user' ? css.userRow : css.message} data-testid="ext-message" data-role={message.role}>
+              <Fragment key={message.id}>
+              {message.switchedTo !== undefined && <li className={css.switchDivider} data-testid="ext-switch-divider"><span>{t('picker.switchedTo', { name: providers.find(item => item.id === message.switchedToProvider)?.label ?? (message.switchedTo === 'codex' ? 'Codex' : 'Claude Code') })}</span></li>}
+              <li className={message.role === 'user' ? css.userRow : css.message} data-testid="ext-message" data-role={message.role}>
                 <div className={message.role === 'user' ? css.userBody : css.assistantBody}>
                   {message.items.map((item, index) => {
                     switch (item.kind) {
@@ -352,6 +436,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
                   </div>
                 )}
               </li>
+              </Fragment>
             ))}
             {transcript.pendingUser !== undefined && (
               <li className={css.userRow} data-testid="ext-pending">
@@ -365,9 +450,9 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
             )}
           </ol>
           {transcript.permissions.map(permission => (
-            <PermissionCard key={permission.requestId} permission={permission} controller={controller} alwaysAllow={alwaysAllow} engine={engine} t={t} />
+            <PermissionCard key={permission.requestId} permission={permission} controller={controller} alwaysAllow={alwaysAllow} engine={sessionEngine} t={t} />
           ))}
-          {transcript.running && <RunningStatus engine={engine} startedAt={transcript.startedAt} t={t} />}
+          {transcript.running && <RunningStatus engine={sessionEngine} startedAt={transcript.startedAt} t={t} />}
           {transcript.error !== undefined && <p className={css.error} data-testid="ext-error" role="alert">{transcript.error}</p>}
         </div>
         <div className={css.composer} data-testid="ext-composer">
@@ -383,6 +468,8 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
               </div>
             )}
             <SlashMenu text={text} commands={info?.commands ?? []} onPick={(name) => { setText(`/${name} `) }} />
+            {dshTarget !== undefined && <p className={css.summary} data-testid="ext-switch-note">{t(attachments.length === 0 ? 'picker.switchNoteDsh' : 'picker.dshNoFiles')}</p>}
+            {switchTarget !== undefined && <p className={css.summary} data-testid="ext-switch-note">{t('picker.switchNote', { name: providers.find(item => item.id === switchTarget)?.label ?? switchTarget })}</p>}
             <div className={css.composerCard}>
               <AttachmentChips attachments={attachments} onRemove={(index) => { setAttachments(current => current.filter((_, position) => position !== index)) }} t={t} />
               <textarea
@@ -422,7 +509,23 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, getD
                   )}
                 </div>
                 <div className={css.trailing}>
-                  <ComposerBar part="trailing" engine={engine} info={info} choice={choice} onChoice={setChoice} onAttach={attach} onDictated={() => {}} t={t} />
+                  {sessionEngine === 'pi'
+                    ? <ComposerBar part="trailing" engine={engine} info={info} choice={choice} onChoice={setChoice} onAttach={attach} onDictated={() => {}} t={t} />
+                    : (
+                      <ProviderPicker
+                        groups={[
+                          ...!draft && dshCatalog.length > 0 ? [{ engine: 'dsh', label: t('picker.dsh'), models: visibleRows('dsh', orderRows(dshCatalog, enginePrefs(modelPrefs, 'dsh').order), modelPrefs) }] : [],
+                          ...offeredProviders.map(item => engineGroup(item.id, item.label, infos[item.id]?.info, infos[item.id]?.error, modelPrefs, t, item.accent)),
+                        ]}
+                        onOpenSettings={openSettings} savedEfforts={modelPrefs.efforts}
+                        accessChip={dshTarget !== undefined ? undefined : <PermissionPopover options={bridgeAccessOptions(t)} value={choice.permission ?? ''} locked={transcript.running} onChange={(permission) => { setChoice({ ...choice, permission: permission as PermissionPreset | '' }) }} t={t} />}
+                        favorites={modelPrefs.favorites} onToggleFavorite={(key) => { saveModelPrefs(toggleFavorite(modelPrefs, key)) }}
+                        current={pickerCurrent} label={dshTarget === undefined ? pickerLabels.label : dshRow?.name ?? dshTarget.modelId} effortLabel={dshTarget === undefined ? pickerLabels.effort : dshRow?.efforts.find(level => level.id === dshTarget.effort)?.name ?? ''}
+                        locked={transcript.running} onPick={pickProvider} t={t}
+                        speed={dshTarget !== undefined ? undefined : { available: fastTier !== undefined, fast: fastTier !== undefined && (choice.speed ?? '') !== '', onChange: (fast) => { setChoice({ ...choice, speed: fast ? fastTier ?? '' : '' }) } }}
+                        access={dshTarget !== undefined ? undefined : <PermissionPicker value={choice.permission ?? ''} onChange={(permission) => { setChoice({ ...choice, permission: permission as PermissionPreset | '' }) }} t={t} />}
+                      />
+                    )}
                   {transcript.running
                     ? (
                       <button type="button" className={css.primary} data-testid="ext-stop" aria-label={t('composer.stop')} title={t('composer.stop')} onClick={() => { void controller.interrupt() }}>

@@ -1,9 +1,8 @@
-/** Controls of the composer card: permission, model, effort, attachments, and the slash-command menu. */
-import { useCallback, useEffect, useRef, useState } from 'react'
+/** Controls of the composer card: model, effort, attachments, and the slash-command menu. */
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { IconPlus } from './icons.tsx'
 import { CHOICE_PATH, type AttachmentWire, type ChoiceWire, type CommandWire, type EngineName, type InfoWire } from '../protocol.ts'
 import type { Translate } from './ToolCard.tsx'
-import { PermissionPicker } from './PermissionPicker.tsx'
 import { DictateButton, useVoiceEnabled } from './voice.tsx'
 import css from './ExternalPanel.module.css'
 
@@ -12,29 +11,46 @@ export type Choice = ChoiceWire
 
 const NO_CHOICE: Choice = { model: '', effort: '' }
 
-function saveChoice(engine: string, choice: Choice): void {
-  void fetch(CHOICE_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine, ...choice }) }).catch(() => {})
+const choices = new Map<string, Choice>()
+const requested = new Set<string>()
+const listeners = new Set<() => void>()
+let choicesVersion = 0
+
+function publishChoices(): void {
+  choicesVersion += 1
+  for (const listener of listeners) listener()
+}
+
+function loadChoice(provider: string): void {
+  if (requested.has(provider)) return
+  requested.add(provider)
+  void fetch(`${CHOICE_PATH}?${new URLSearchParams({ engine: provider }).toString()}`, { credentials: 'same-origin' })
+    .then(async response => await response.json() as Choice)
+    // A pick made while the saved choice is still loading wins over the saved one.
+    .then((choice) => { if (!choices.has(provider)) { choices.set(provider, choice); publishChoices() } }, () => { requested.delete(provider) })
+}
+
+function setChoiceOf(provider: string, choice: Choice): void {
+  choices.set(provider, choice)
+  publishChoices()
+  void fetch(CHOICE_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engine: provider, ...choice }) }).catch(() => {})
+}
+
+function subscribeChoices(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => { listeners.delete(listener) }
 }
 
 /**
- * The engine's saved choice and a setter that saves the new one.
- * @param engine - engine whose choice is shown.
- * @returns the choice (no choice until the saved one arrives) and its setter.
+ * The saved choices of several providers, with setters that save a new choice.
+ * @param providers - provider ids.
+ * @returns each provider's choice (no choice until the saved one arrives) and setter.
  */
-export function useChoice(engine: string): [Choice, (choice: Choice) => void] {
-  const [loaded, setLoaded] = useState<{ engine: string; choice: Choice } | undefined>(undefined)
-  // A pick made while the saved choice is still loading wins over the saved one.
-  const picked = useRef<string | undefined>(undefined)
-  useEffect(() => {
-    let cancelled = false
-    picked.current = undefined
-    void fetch(`${CHOICE_PATH}?${new URLSearchParams({ engine }).toString()}`, { credentials: 'same-origin' })
-      .then(async response => await response.json() as Choice)
-      .then((choice) => { if (!cancelled && picked.current !== engine) setLoaded({ engine, choice }) }, () => {})
-    return () => { cancelled = true }
-  }, [engine])
-  const set = useCallback((choice: Choice): void => { picked.current = engine; setLoaded({ engine, choice }); saveChoice(engine, choice) }, [engine])
-  return [loaded?.engine === engine ? loaded.choice : NO_CHOICE, set]
+export function useChoices(providers: readonly string[]): Readonly<Record<string, [Choice, (choice: Choice) => void]>> {
+  const list = providers.join('|')
+  useEffect(() => { for (const provider of providers) loadChoice(provider) }, [list])
+  useSyncExternalStore(subscribeChoices, () => choicesVersion)
+  return Object.fromEntries(providers.map(provider => [provider, [choices.get(provider) ?? NO_CHOICE, (choice: Choice) => { setChoiceOf(provider, choice) }]]))
 }
 
 /** Read files into attachments. */
@@ -89,10 +105,10 @@ export function AttachmentChips({ attachments, onRemove, t }: { attachments: rea
 }
 
 /**
- * Toolbar controls of the composer card. As in the dsh composer, the leading part (attach, permission, dictate)
+ * Toolbar controls of the composer card. As in the dsh composer, the leading part (attach, dictate)
  * opens the toolbar and the trailing part (model, effort) sits beside the send button.
  */
-export function ComposerBar({ part, engine, info, choice, onChoice, onAttach, onDictated, t }: {
+export function ComposerBar({ part, info, choice, onChoice, onAttach, onDictated, t }: {
   part: 'leading' | 'trailing'
   engine: EngineName
   info: InfoWire | undefined
@@ -130,7 +146,6 @@ export function ComposerBar({ part, engine, info, choice, onChoice, onAttach, on
           ref={setPicker} type="file" multiple hidden data-testid="ext-attach-input"
           onChange={(event) => { onAttach(Array.from(event.target.files ?? [])); event.target.value = '' }}
         />
-        {engine !== 'pi' && <PermissionPicker value={choice.permission ?? ''} onChange={(permission) => { update({ permission }) }} t={t} />}
         {voice && <DictateButton onText={onDictated} t={t} className={css.iconTool} />}
       </>
     )

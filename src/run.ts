@@ -5,8 +5,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
-import { query, type Options, type PermissionMode, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import { claudeConfigDir } from './claude.ts'
+import { query, type AccountInfo, type Options, type PermissionMode, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import { claudeConfigDir, configuredClaudeDir } from './claude.ts'
 import { modelLabel, readClaudeEffortSetting } from './defaults.ts'
 import { LiveHub } from './live.ts'
 import type { InfoWire, PermissionWire, QuestionWire } from './protocol.ts'
@@ -31,6 +31,12 @@ export interface TurnOptions {
   /** Model and reasoning effort; undefined uses the engine default. */
   readonly model?: string
   readonly effort?: string
+  /** Fast tier, or empty for standard speed; undefined leaves Claude Code's own setting. */
+  readonly speed?: string
+  /** `CLAUDE_CONFIG_DIR` of an added instance. */
+  readonly configDir?: string
+  /** Launch arguments of an added instance. */
+  readonly extraArgs?: Record<string, string | null>
   /** Images embedded in the message. */
   readonly images?: readonly { readonly mime: string; readonly base64: string }[]
 }
@@ -41,6 +47,8 @@ interface Run {
   readonly query: Query
   readonly pending: Map<string, (decision: Decision) => void>
   interrupted: boolean
+  /** Text of the turn, which finds the turn in the transcript. */
+  readonly prompt: string
 }
 
 /** MCP server name of the screen-control tools this plugin adds. */
@@ -110,8 +118,10 @@ function baseOptions(options: TurnOptions): Options {
     ...options.memory === '' ? {} : { systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: `# Memory shared from dsh\n${options.memory}` } },
     ...options.model === undefined || options.model === '' ? {} : { model: options.model },
     ...isEffort(options.effort) ? { effort: options.effort } : {},
+    ...options.speed === undefined ? {} : { settings: { fastMode: options.speed !== '' } as NonNullable<Options['settings']> },
     settingSources: ['user', 'project', 'local'],
-    env: childEnv(),
+    env: { ...childEnv(), CLAUDE_CONFIG_DIR: options.configDir ?? configuredClaudeDir() },
+    ...options.extraArgs === undefined ? {} : { extraArgs: options.extraArgs },
   }
 }
 
@@ -130,6 +140,16 @@ export function promptOf(options: Pick<TurnOptions, 'text' | 'images'>): string 
   })()
 }
 
+/**
+ * Decide if an account report names a usable login. The SDK writes "none" for a missing token or key, and "firstParty" even with no login.
+ * @param account - the report from `accountInfo`.
+ * @returns true when the report names a login, a token, a key or an external provider.
+ */
+export function isSignedIn(account: AccountInfo): boolean {
+  const present = (source: string | undefined): boolean => source !== undefined && source !== 'none'
+  return account.email !== undefined || present(account.tokenSource) || present(account.apiKeySource) || (account.apiProvider !== undefined && account.apiProvider !== 'firstParty')
+}
+
 /** What the Claude executable offers for a working directory. */
 export async function probeInfo(options: TurnOptions): Promise<InfoWire> {
   const stream = query({ prompt: 'ok', options: { ...baseOptions({ ...options, text: 'ok' }), persistSession: false } })
@@ -142,9 +162,10 @@ export async function probeInfo(options: TurnOptions): Promise<InfoWire> {
       const listed = models.map(model => ({
         value: model.value, name: model.displayName, description: model.description,
         efforts: model.supportsEffort === true ? model.supportedEffortLevels ?? [] : [],
+        ...model.supportsFastMode === true ? { fastTier: 'fast' } : {},
       }))
       // The probe passes no model or effort when none is picked, so init reports what Claude Code chose by itself.
-      const effort = message.effort ?? readClaudeEffortSetting(claudeConfigDir())
+      const effort = message.effort ?? readClaudeEffortSetting(claudeConfigDir(options.configDir))
       return {
         models: listed,
         defaults: { model: modelLabel(message.model, listed), ...effort === undefined || effort === null ? {} : { effort } },
@@ -154,7 +175,7 @@ export async function probeInfo(options: TurnOptions): Promise<InfoWire> {
           ...server.scope === undefined ? {} : { scope: server.scope }, ...server.error === undefined ? {} : { error: server.error },
           ...server.tools === undefined ? {} : { tools: server.tools.length },
         })),
-        ...account === undefined ? {} : { account: { loggedIn: account.email !== undefined || account.apiProvider !== undefined || account.tokenSource !== undefined || account.apiKeySource !== undefined,
+        ...account === undefined ? {} : { account: { loggedIn: isSignedIn(account),
           ...account.email === undefined ? {} : { email: account.email },
           ...account.subscriptionType === undefined ? {} : { plan: account.subscriptionType },
           ...account.apiProvider === undefined ? {} : { provider: account.apiProvider } } },
@@ -217,7 +238,7 @@ export class RunManager {
     })
     let sessionId = options.sessionId
     const resolvedId = (): string => sessionId ?? ''
-    current = { query: stream, pending: new Map(), interrupted: false }
+    current = { query: stream, pending: new Map(), interrupted: false, prompt: options.text }
     if (sessionId !== undefined) {
       this.runs.set(sessionId, current)
       this.hub.begin(sessionId)
@@ -299,6 +320,14 @@ export class RunManager {
    */
   isRunning(sessionId: string): boolean {
     return this.runs.has(sessionId)
+  }
+
+  /**
+   * @param sessionId - session id.
+   * @returns the text of the running turn, or undefined when no turn is running.
+   */
+  runningPrompt(sessionId: string): string | undefined {
+    return this.runs.get(sessionId)?.prompt
   }
 
   /**

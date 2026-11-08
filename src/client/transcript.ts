@@ -5,8 +5,8 @@
  */
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  ANSWER_PATH, ARCHIVE_PATH, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, NEW_SESSION_ID, engineOfSession, SEND_PATH, SESSION_PATH, WATCH_PATH,
-  type AnswerBodyWire, type GoalWire, type LiveEventWire, type ManageBodyWire, type MessageWire, type PermissionWire, type SendBodyWire, type SessionWire, type UsageWire, type AttachmentWire,
+  ANSWER_PATH, ARCHIVE_PATH, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, engineOfSession, instanceOfSession, isDraftId, SEND_PATH, SESSION_PATH, WATCH_PATH,
+  type AnswerBodyWire, type GoalWire, type LiveEventWire, type ManageBodyWire, type MessageWire, type PermissionWire, type SendBodyWire, type SessionWire, type UsageWire, type AttachmentWire, type EngineName, type PermissionPreset,
 } from '../protocol.ts'
 
 /** Transcript and live-turn state the panel renders. */
@@ -65,24 +65,46 @@ export interface TranscriptController extends HostObservable<TranscriptState> {
   /** Interrupt the running turn. */
   interrupt(): Promise<void>
   /**
-   * Fork, rename, or delete the open session.
+   * Show an error in the open session.
+   * @param message - the error text.
+   */
+  fail(message: string): void
+  /**
+   * Fork a session with the engine of that session, and open the fork.
+   * @param id - session to fork; it does not have to be the open session.
+   * @param title - title of the fork.
+   * @param cwd - folder of the session.
+   * @returns the id of the fork, or undefined if the fork failed.
+   */
+  fork(id: string, title: string, cwd: string): Promise<string | undefined>
+  /**
+   * Rename or delete the open session.
    * @param action - the operation.
    * @param title - new title for `rename`.
    */
-  manage(action: ManageBodyWire['action'], title?: string): Promise<void>
+  manage(action: Exclude<ManageBodyWire['action'], 'fork'>, title?: string): Promise<void>
 }
 
 /** Per-turn choices that ride along with a message. */
 export interface SendExtras {
   readonly model?: string
   readonly effort?: string
+  readonly permission?: PermissionPreset
+  readonly speed?: string
   readonly attachments?: readonly AttachmentWire[]
+  /** The other provider to send to; with `switchFrom`, the conversation moves there. */
+  readonly engine?: EngineName
+  readonly instance?: string
+  /** The open session, when the message moves the conversation to `engine`. */
+  readonly switchFrom?: string
 }
 
 /** Callbacks into the plugin entry. */
 export interface TranscriptHooks {
   /** A send on the draft created this session. */
   onCreated(id: string, cwd: string, prompt: string): void
+  /** A send moved the conversation to the other provider's thread. */
+  onSwitched(fromId: string, id: string, cwd: string, prompt: string): void
   /** A turn ended or the stored sessions changed; the session list should be refreshed. */
   onTurnEnded(): void
   /** A turn was accepted by the host; the list should show it as running. */
@@ -95,7 +117,7 @@ export interface TranscriptHooks {
 
 /** @param id - external session id. @returns whether it is a new-session draft. */
 export function isDraft(id: string | undefined): boolean {
-  return id === NEW_SESSION_ID || id === NEW_CODEX_SESSION_ID || id === NEW_PI_SESSION_ID
+  return isDraftId(id)
 }
 
 const IDLE: TranscriptState = Object.freeze({
@@ -220,21 +242,27 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
       }
     }
   }
-  const load = (id: string): void => {
+  const load = (id: string, carried?: Pick<TranscriptState, 'messages' | 'pendingUser' | 'startedAt'>): void => {
     generation += 1
     const mine = generation
     closeFeeds()
-    pendingBase = 0
+    pendingBase = carried?.messages.length ?? 0
     if (isDraft(id)) {
       publish({ ...IDLE, status: 'ready', sessionId: id })
       return
     }
-    publish({ ...IDLE, status: 'loading', sessionId: id })
+    publish({ ...IDLE, status: 'loading', sessionId: id, ...carried === undefined ? {} : { ...carried, running: true } })
     startLive(id, mine)
     void refresh(id, mine)
       .then((ok) => { if (ok) startWatch(id, mine) })
       .catch((error: unknown) => {
         if (mine !== generation) return
+        // A thread that a switch just created can be unreadable for a moment; the live turn refreshes the transcript.
+        if (carried !== undefined) {
+          patch({ status: 'ready' })
+          startWatch(id, mine)
+          return
+        }
         console.warn('agent-bridge: transcript load failed', error)
         patch({ status: 'failed' })
       })
@@ -262,11 +290,18 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
       pendingBase = state.messages.length
       patch({ running: true, pendingUser: text, startedAt: Date.now(), partial: '', error: undefined })
       try {
-        const body: SendBodyWire = { ...draft ? { text, cwd, engine: engineOfSession(current) } : { id: current, text, ...cwd === '' ? {} : { cwd } }, ...extras }
+        const switching = extras?.switchFrom !== undefined
+        const body: SendBodyWire = { ...draft ? { text, cwd, engine: engineOfSession(current), ...instanceOfSession(current) === undefined ? {} : { instance: instanceOfSession(current) as string } } : switching ? { text, cwd } : { id: current, text, ...cwd === '' ? {} : { cwd } }, ...extras }
         const response = await post(SEND_PATH, body)
         if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`)
         const { id } = await response.json() as { id: string }
         hooks.onTurnStarted()
+        if (switching) {
+          hooks.onSwitched(current, id, cwd, text)
+          // The transcript stays on screen while the merged one loads.
+          load(id, { messages: state.messages, pendingUser: text, startedAt: state.startedAt })
+          return
+        }
         if (draft) {
           const mine = generation
           hooks.onCreated(id, cwd, text)
@@ -287,6 +322,20 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
       }
       await post(ANSWER_PATH, body)
     },
+    fail(message) {
+      patch({ error: message })
+    },
+    async fork(id, title, cwd) {
+      const response = await post(MANAGE_PATH, { id, action: 'fork', title, cwd } satisfies ManageBodyWire)
+      if (!response.ok) {
+        patch({ error: ((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}` })
+        return undefined
+      }
+      const { id: forked } = await response.json() as { id: string }
+      hooks.onCreated(forked, cwd, title)
+      load(forked)
+      return forked
+    },
     async manage(action, title) {
       const current = state.sessionId
       if (current === undefined || isDraft(current) || state.running) return
@@ -296,11 +345,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
         patch({ error: ((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}` })
         return
       }
-      if (action === 'fork') {
-        const { id } = await response.json() as { id: string }
-        hooks.onCreated(id, '', title ?? '')
-        load(id)
-      } else if (action === 'delete') {
+      if (action === 'delete') {
         generation += 1
         closeFeeds()
         publish(IDLE)

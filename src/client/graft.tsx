@@ -14,6 +14,7 @@
  */
 import { Component, createElement, useMemo, useSyncExternalStore, type ComponentType, type ReactNode } from 'react'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
+import { isDraft } from './transcript.ts'
 
 /** Prefix of external row ids in the browser; Host SessionIds never carry it. */
 export const EXTERNAL_PREFIX = 'ext:'
@@ -141,6 +142,11 @@ type SessionSummaryLike = { id: string; retainedBy?: Record<string, number | und
 type SessionListLike = { ids: readonly string[]; byId: Record<string, SessionSummaryLike> } & Record<string, unknown>
 type WorkspaceLike = { path?: string; sessionIds?: readonly string[] } & Record<string, unknown>
 
+/** The rows the Workspace browser lists: a new chat starts from the selector, so the new-session drafts are left out. */
+function sidebarRows(external: GraftSnapshot): GraftSnapshot['rows'] {
+  return external.rows.filter(row => !isDraft(row.id))
+}
+
 /**
  * Host Session list with the external rows appended. While the external panel shows a row, that row is the
  * one the main view retains, so the browser's own highlight rule selects it.
@@ -150,7 +156,8 @@ type WorkspaceLike = { path?: string; sessionIds?: readonly string[] } & Record<
  * @returns `list` itself when nothing changes, otherwise a merged copy.
  */
 export function mergeList(list: SessionListLike, external: GraftSnapshot, externalShown: boolean): SessionListLike {
-  if (external.rows.length === 0 && !externalShown) return list
+  const rows = sidebarRows(external)
+  if (rows.length === 0 && !externalShown) return list
   const ids = [...list.ids]
   const byId: Record<string, SessionSummaryLike> = { ...list.byId }
   if (externalShown) {
@@ -159,7 +166,7 @@ export function mergeList(list: SessionListLike, external: GraftSnapshot, extern
       if ((row?.retainedBy?.['mainView'] ?? 0) > 0) byId[id] = { ...row!, retainedBy: { ...row!.retainedBy, mainView: 0 } }
     }
   }
-  for (const row of external.rows) {
+  for (const row of rows) {
     const id = EXTERNAL_PREFIX + row.id
     byId[id] = {
       id,
@@ -183,10 +190,11 @@ export function mergeList(list: SessionListLike, external: GraftSnapshot, extern
  * @returns `items` itself when no row matches, otherwise copies with the rows appended.
  */
 export function mergeWorkspaces(items: readonly WorkspaceLike[], external: GraftSnapshot): readonly WorkspaceLike[] {
-  if (external.rows.length === 0) return items
+  const rows = sidebarRows(external)
+  if (rows.length === 0) return items
   let changed = false
   const next = items.map((workspace) => {
-    const extra = external.rows.filter(row => row.cwd === workspace.path).map(row => EXTERNAL_PREFIX + row.id)
+    const extra = rows.filter(row => row.cwd === workspace.path).map(row => EXTERNAL_PREFIX + row.id)
     if (extra.length === 0) return workspace
     changed = true
     return { ...workspace, sessionIds: [...workspace.sessionIds ?? [], ...extra] }

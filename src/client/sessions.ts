@@ -15,6 +15,10 @@ export interface SessionRow {
   readonly updatedAt: number
   /** Whether a turn is running in this session. */
   readonly running?: boolean
+  /** Branch that the session recorded. */
+  readonly branch?: string | undefined
+  /** Whether the session has activity that the user has not opened. */
+  readonly unread?: boolean | undefined
 }
 
 /** What the page renders: every row and the open one. */

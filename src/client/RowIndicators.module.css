@@ -1,0 +1,32 @@
+.root {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+  flex: none;
+}
+
+.merged,
+.open,
+.unmerged {
+  display: inline-flex;
+}
+
+.merged {
+  color: #a371f7;
+}
+
+.open {
+  color: #3fb950;
+}
+
+.unmerged {
+  color: var(--text-tertiary, #8b8b8b);
+}
+
+.unread {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4f8cff;
+}

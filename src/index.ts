@@ -4,9 +4,10 @@
  * and a change feed for the transcript file.
  * @module dsh-agent-bridge
  */
+import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { execFile } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -14,7 +15,7 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import {
-  deleteClaudeSession, findClaudeFile, forkClaudeSession, listClaudeRows, readClaudeGoal, readClaudeMessages, readClaudeUsage, renameClaudeSession, searchClaude,
+  deleteClaudeSession, findClaudeFile, forkClaudeSession, listClaudeRows, serializeClaudeSdk, readClaudeGoal, readClaudeMessages, readClaudeUsage, renameClaudeSession, searchClaude,
 } from './claude.ts'
 import { CodexEngine } from './codex.ts'
 import { listPiRows, PiEngine, findPiFile, readPiMessages, readPiUsage, searchPi } from './pi.ts'
@@ -27,13 +28,19 @@ import { readAbout } from './about.ts'
 import { claudePermission, codexPermission, parsePreset } from './permissions.ts'
 import { startHeapWatch } from './diagnostics.ts'
 import { createSingleFlight } from './single-flight.ts'
+import { parseModelPrefs } from './model-prefs.ts'
+import { completedPrefix, forkedLink, mergeUnlistedForks } from './fork.ts'
+import { importEvents, type SeedEvent } from './dsh-import.ts'
+import { BranchStatusReader } from './branch-status.ts'
+import { claudeExtraArgs, expandHome, parseInstance, splitLaunchArgs } from './instances.ts'
+import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, isCommand, linkOf, mergeLinkedMessages, planSwitch, readableCatchup, recordSwitch, removeThread, renderCatchup, withoutCatchup, type ThreadLink } from './links.ts'
 import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig } from './extras.ts'
 import {
   browseDirs, fsAction, gitClone, gitWorktreeAction, gitWorktrees, readImage,
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -151,12 +158,18 @@ function json(body: unknown, status = 200): Response {
 interface EngineId {
   readonly engine: EngineName
   readonly raw: string
+  /** Added provider instance, when the session belongs to one. */
+  readonly instance?: string
 }
 
 function parseId(id: string): EngineId | undefined {
-  if (id.startsWith(CLAUDE_ID_PREFIX)) return { engine: 'claude', raw: id.slice(CLAUDE_ID_PREFIX.length) }
-  if (id.startsWith(CODEX_ID_PREFIX)) return { engine: 'codex', raw: id.slice(CODEX_ID_PREFIX.length) }
-  if (id.startsWith(PI_ID_PREFIX)) return { engine: 'pi', raw: id.slice(PI_ID_PREFIX.length) }
+  const split = (engine: EngineName, rest: string): EngineId => {
+    const instance = instanceOfSession(id)
+    return instance === undefined ? { engine, raw: rest } : { engine, raw: rest.slice(instance.length + 2), instance }
+  }
+  if (id.startsWith(CLAUDE_ID_PREFIX)) return split('claude', id.slice(CLAUDE_ID_PREFIX.length))
+  if (id.startsWith(CODEX_ID_PREFIX)) return split('codex', id.slice(CODEX_ID_PREFIX.length))
+  if (id.startsWith(PI_ID_PREFIX)) return split('pi', id.slice(PI_ID_PREFIX.length))
   return undefined
 }
 
@@ -166,8 +179,9 @@ function idOf(request: Request): EngineId | undefined {
 
 const ID_PREFIXES: Readonly<Record<EngineName, string>> = { claude: CLAUDE_ID_PREFIX, codex: CODEX_ID_PREFIX, pi: PI_ID_PREFIX }
 
-function prefixed(engine: EngineName, raw: string): string {
-  return `${ID_PREFIXES[engine]}${raw}`
+function prefixed(engine: EngineName, raw: string, instance?: string): string {
+  const id = `${ID_PREFIXES[engine]}${raw}`
+  return instance === undefined ? id : withInstanceId(id, instance)
 }
 
 /** What the routes need from an engine; each engine provides one. */
@@ -179,14 +193,14 @@ interface Driver {
   isRunning(id: string): boolean
   interrupt(id: string): Promise<boolean>
   answer(id: string, requestId: string, body: AnswerBodyWire): boolean
-  fork(id: string): Promise<string>
+  fork(id: string, title?: string): Promise<string>
   rename(id: string, title: string): Promise<void>
   delete(id: string): Promise<void>
 }
 
-async function watchResponse(request: Request, intervalMs: number, driverOf: (engine: EngineName) => Driver): Promise<Response> {
+async function watchResponse(request: Request, intervalMs: number, driverOf: (engine: EngineName, instance?: string) => Driver): Promise<Response> {
   const parsed = idOf(request)
-  const file = parsed === undefined ? undefined : await driverOf(parsed.engine).findFile(parsed.raw)
+  const file = parsed === undefined ? undefined : await driverOf(parsed.engine, parsed.instance).findFile(parsed.raw)
   if (file === undefined) return json({ error: 'unknown session' }, 404)
   return watchStream(file, intervalMs, request.signal)
 }
@@ -195,12 +209,12 @@ function homedirOf(settings: Settings): string {
   return settings.defaultCwd === '' ? homedir() : settings.defaultCwd
 }
 
-function turnOptions(settings: Settings, sessionId: string | undefined, text: string, cwd: string, memory = '', extra: Pick<TurnOptions, 'model' | 'effort' | 'images'> = {}): TurnOptions {
+function turnOptions(settings: Settings, sessionId: string | undefined, text: string, cwd: string, memory = '', extra: Pick<TurnOptions, 'model' | 'effort' | 'speed' | 'images' | 'configDir' | 'extraArgs'> & { readonly executable?: string } = {}): TurnOptions {
   return {
     ...extra,
     ...sessionId === undefined ? {} : { sessionId },
     cwd, text,
-    executable: settings.claudeExecutable,
+    executable: extra.executable ?? settings.claudeExecutable,
     permissionMode: settings.permissionMode,
     allowedTools: settings.allowedTools,
     computerUse: settings.computerUse,
@@ -211,7 +225,7 @@ function turnOptions(settings: Settings, sessionId: string | undefined, text: st
   }
 }
 
-function liveResponse(request: Request, driverOf: (engine: EngineName) => Driver): Response {
+function liveResponse(request: Request, driverOf: (engine: EngineName, instance?: string) => Driver): Response {
   const parsed = idOf(request)
   if (parsed === undefined) return json({ error: 'unknown session' }, 404)
   const encoder = new TextEncoder()
@@ -221,7 +235,7 @@ function liveResponse(request: Request, driverOf: (engine: EngineName) => Driver
       const send = (event: LiveEventWire): void => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
       }
-      release = driverOf(parsed.engine).subscribe(parsed.raw, send)
+      release = driverOf(parsed.engine, parsed.instance).subscribe(parsed.raw, send)
       request.signal.addEventListener('abort', () => release?.(), { once: true })
     },
     cancel: () => release?.(),
@@ -240,6 +254,13 @@ function liveResponse(request: Request, driverOf: (engine: EngineName) => Driver
  * @param ctx - plugin context.
  * @param config - configuration from the composition entry.
  */
+/** Host services that create a DSH session with history; their types belong to the harness packages. */
+interface DshHostServices {
+  readonly agents: { create(options: { sessionId: string; seed: readonly SeedEvent[]; meta: { cwd: string; agentPreset?: string }; agentOptions: { provider: string; model: string; reasoningEffort?: string }; setup?: (agentCtx: Context) => Promise<void> }): Promise<{ readonly agent: { readonly id: string } }> }
+  readonly agentPresets?: { resolve(id: undefined): Promise<{ readonly id: string }>; mount(agentCtx: Context, id: string): Promise<void> }
+  readonly workspaceRegistry?: { list(): readonly { readonly path: string; attachSession(id: string): Promise<void> }[] }
+}
+
 export function apply(ctx: Context, config: Config): void {
   const current = (): Settings => {
     const settings = config.get() as Settings
@@ -264,45 +285,79 @@ export function apply(ctx: Context, config: Config): void {
     return piEngine
   }
   const store = new StateStore(process.env['AGENT_BRIDGE_STATE'] ?? defaultStatePath(), defaultStatePath('external-engines'))
+  const syncClaudeSerialization = (): void => { serializeClaudeSdk(store.get('instances').some(item => item.engine === 'claude')) }
+  syncClaudeSerialization()
+  const requireInstance = (id: string): ProviderInstanceWire => {
+    const found = store.get('instances').find(item => item.id === id)
+    if (found === undefined) throw new HttpError(404, `unknown provider instance ${id}`)
+    return found
+  }
+  const codexEngines = new Map<string, CodexEngine>()
+  const codexFor = (instance: string | undefined): CodexEngine => {
+    if (instance === undefined) return codex()
+    const known = codexEngines.get(instance)
+    if (known !== undefined) return known
+    const item = requireInstance(instance)
+    const engine = new CodexEngine(item.binaryPath === undefined ? current().codexExecutable : resolveCommand(item.binaryPath), { env: { CODEX_HOME: expandHome(item.home) }, args: splitLaunchArgs(item.launchArgs) })
+    codexEngines.set(instance, engine)
+    return engine
+  }
+  /** What a Claude turn or probe of an added instance needs. */
+  const claudeExtras = (instance: string | undefined): Pick<TurnOptions, 'configDir' | 'extraArgs'> & { readonly executable?: string } => {
+    if (instance === undefined) return {}
+    const item = requireInstance(instance)
+    return { configDir: expandHome(item.home), extraArgs: claudeExtraArgs(item.launchArgs), ...item.binaryPath === undefined ? {} : { executable: resolveCommand(item.binaryPath) } }
+  }
+  const claudeHome = (instance: string | undefined): string | undefined => instance === undefined ? undefined : expandHome(requireInstance(instance).home)
   const terminals = new TerminalManager()
   ctx.effect(() => () => {
     terminals.closeAll()
     void runs.closeAll()
     void codexEngine?.closeAll()
+    for (const engine of codexEngines.values()) void engine.closeAll()
     piEngine?.closeAll()
   }, 'agent-bridge: runs')
-  const claudeDriver: Driver = {
-    readMessages: async id => ({ messages: await readClaudeMessages(id) }),
-    readGoal: readClaudeGoal,
-    findFile: findClaudeFile,
+  const makeClaudeDriver = (home?: string): Driver => ({
+    readMessages: async id => ({ messages: await readClaudeMessages(id, home) }),
+    readGoal: id => readClaudeGoal(id, home),
+    findFile: id => findClaudeFile(id, home),
     subscribe: (id, subscriber) => runs.subscribe(id, subscriber),
     isRunning: id => runs.isRunning(id),
     interrupt: id => runs.interrupt(id),
     answer: (id, requestId, body) => runs.answer(id, requestId, body.behavior === 'allow'
       ? { behavior: 'allow', ...body.answers === undefined ? {} : { answers: body.answers } }
       : { behavior: 'deny' }),
-    fork: forkClaudeSession,
-    rename: renameClaudeSession,
-    delete: deleteClaudeSession,
-  }
-  const codexDriver: Driver = {
+    fork: async (id, title) => {
+      const prompt = runs.runningPrompt(id)
+      const prefix = prompt === undefined ? {} : completedPrefix(await readClaudeMessages(id, home), prompt)
+      if (prefix === undefined) throw new HttpError(409, 'this session has no completed turn to fork from')
+      return await forkClaudeSession(id, home, { ...title === undefined ? {} : { title }, ...prefix })
+    },
+    rename: (id, title) => renameClaudeSession(id, title, home),
+    delete: id => deleteClaudeSession(id, home),
+  })
+  const makeCodexDriver = (engine: () => CodexEngine): Driver => ({
     readMessages: async (id) => {
       const turns = current().codexHistoryTurns
-      const page = await codex().readMessages(id, turns)
+      const page = await engine().readMessages(id, turns)
       return { messages: page.messages, ...page.earlierOmitted ? { recentTurns: turns } : {} }
     },
-    readGoal: id => codex().readGoal(id),
-    findFile: id => codex().findFile(id),
-    subscribe: (id, subscriber) => codex().subscribe(id, subscriber),
-    isRunning: id => codex().isRunning(id),
-    interrupt: id => codex().interrupt(id),
-    answer: (id, requestId, body) => codex().answer(id, requestId, body.behavior === 'allow'
+    readGoal: id => engine().readGoal(id),
+    findFile: id => engine().findFile(id),
+    subscribe: (id, subscriber) => engine().subscribe(id, subscriber),
+    isRunning: id => engine().isRunning(id),
+    interrupt: id => engine().interrupt(id),
+    answer: (id, requestId, body) => engine().answer(id, requestId, body.behavior === 'allow'
       ? { behavior: 'allow', ...body.answers === undefined ? {} : { answers: body.answers }, ...body.remember === true ? { remember: true } : {} }
       : { behavior: 'deny' }),
-    fork: id => codex().fork(id),
-    rename: (id, title) => codex().rename(id, title),
-    delete: id => codex().delete(id),
-  }
+    fork: async (id, title) => {
+      const forked = await engine().fork(id)
+      if (title !== undefined) await engine().rename(forked, title)
+      return forked
+    },
+    rename: (id, title) => engine().rename(id, title),
+    delete: id => engine().delete(id),
+  })
   const piDriver: Driver = {
     readMessages: async id => ({ messages: await readPiMessages(id) }),
     readGoal: () => Promise.resolve(undefined),
@@ -317,8 +372,16 @@ export function apply(ctx: Context, config: Config): void {
     rename: (id, title) => pi().rename(id, title),
     delete: id => pi().delete(id),
   }
-  const drivers: Readonly<Record<EngineName, Driver>> = { claude: claudeDriver, codex: codexDriver, pi: piDriver }
-  const driverOf = (engine: EngineName): Driver => drivers[engine]
+  const drivers: Readonly<Record<EngineName, Driver>> = { claude: makeClaudeDriver(), codex: makeCodexDriver(codex), pi: piDriver }
+  const instanceDrivers = new Map<string, Driver>()
+  const driverOf = (engine: EngineName, instance?: string): Driver => {
+    if (instance === undefined) return drivers[engine]
+    const known = instanceDrivers.get(instance)
+    if (known !== undefined) return known
+    const made = engine === 'codex' ? makeCodexDriver(() => codexFor(instance)) : makeClaudeDriver(claudeHome(instance))
+    instanceDrivers.set(instance, made)
+    return made
+  }
   const heapWatchMb = current().heapWatchMb
   const heapWatch = heapWatchMb > 0 ? startHeapWatch(join(dirname(defaultStatePath()), 'heap'), heapWatchMb) : undefined
   ctx.effect(() => () => { heapWatch?.stop() }, 'agent-bridge: heap watch')
@@ -356,26 +419,139 @@ export function apply(ctx: Context, config: Config): void {
     const archived = new Set(store.get('archived'))
     const wantArchived = query(request, 'archived') === '1'
     const piRows = settings.piEnabled ? await listPiRows(settings.sessionLimit) : []
-    const all = [...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows]
-    const rows = all.filter(row => archived.has(row.id) === wantArchived).sort((a, b) => b.updatedAt - a.updatedAt)
+    const instanceRows = (await Promise.all(store.get('instances').map(async (item): Promise<SessionRowWire[]> => {
+      try {
+        const listed = item.engine === 'codex' ? await codexFor(item.id).listRows(settings.sessionLimit) : await listClaudeRows(settings.sessionLimit, claudeHome(item.id))
+        return listed.map(row => ({ ...row, id: withInstanceId(row.id, item.id) }))
+      } catch (error) {
+        warnings.push(`${item.id}: ${error instanceof Error ? error.message : String(error)}`)
+        return []
+      }
+    }))).flat()
+    const saved = store.get('unlistedForks')
+    const { rows: all, unlisted } = mergeUnlistedForks([...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows, ...instanceRows], saved)
+    if (unlisted.length !== saved.length) store.set('unlistedForks', unlisted)
+    const hidden = hiddenThreadIds(store.get('links'))
+    const rows = all.filter(row => archived.has(row.id) === wantArchived && !hidden.has(row.id)).map(row => ({ ...row, title: cleanTitle(row.title) })).sort((a, b) => b.updatedAt - a.updatedAt)
     const running = rows.filter((row) => {
       const parsed = parseId(row.id)
-      return parsed !== undefined && driverOf(parsed.engine).isRunning(parsed.raw)
+      return parsed !== undefined && driverOf(parsed.engine, parsed.instance).isRunning(parsed.raw)
     }).map(row => row.id)
-    return json({ sessions: rows, running, pinned: store.get('pinned'), defaultCwd: homedirOf(settings), codexEnabled: settings.codexEnabled, // A bare name means the command was not found, so no new-session entry is offered.
+    const marks = store.get('seen')
+    // A session is unread only after the first listing, so that a new install does not mark every row.
+    if (!wantArchived && rows.some(row => marks[row.id] === undefined)) store.set('seen', Object.fromEntries(rows.map(row => [row.id, marks[row.id] ?? row.updatedAt])))
+    const sessions = rows.map(row => ({ ...row, unread: marks[row.id] !== undefined && row.updatedAt > (marks[row.id] as number) && !running.includes(row.id) }))
+    return json({ sessions, running, pinned: store.get('pinned'), defaultCwd: homedirOf(settings), codexEnabled: settings.codexEnabled, // A bare name means the command was not found, so no new-session entry is offered.
       piEnabled: settings.piEnabled && settings.piExecutable.includes('/'), warnings })
   }, 'sessions')
   // A transcript can be tens of megabytes; requests that arrive while it is being read share that read.
   const sessionReads = createSingleFlight<SessionWire>()
+  /** Transcripts of a linked conversation; a thread that cannot be read must not hide the open one. */
+  const linkedThreads = async (link: ThreadLink, openId: string, openMessages: readonly MessageWire[]): Promise<Record<string, readonly MessageWire[]>> => {
+    const others = Object.values(link.threads).filter((id): id is string => id !== undefined && id !== openId)
+    const read = await Promise.all(others.map(async (id): Promise<[string, readonly MessageWire[]]> => {
+      const other = parseId(id)
+      if (other === undefined) return [id, []]
+      try {
+        return [id, (await driverOf(other.engine, other.instance).readMessages(other.raw)).messages]
+      } catch (error) {
+        console.warn('agent-bridge: linked thread could not be read', id, error)
+        return [id, []]
+      }
+    }))
+    return { ...Object.fromEntries(read), [openId]: openMessages }
+  }
+  const forkThread = async (id: string, title?: string): Promise<string> => {
+    const parsed = parseId(id)
+    if (parsed === undefined) throw new HttpError(404, 'unknown session')
+    return prefixed(parsed.engine, await driverOf(parsed.engine, parsed.instance).fork(parsed.raw, title), parsed.instance)
+  }
+  const readThread = async (id: string): Promise<readonly MessageWire[]> => {
+    const parsed = parseId(id)
+    if (parsed === undefined) throw new HttpError(404, 'unknown session')
+    return (await driverOf(parsed.engine, parsed.instance).readMessages(parsed.raw)).messages
+  }
+  /** Fork one thread with its own engine. A conversation across providers forks every thread, so that the fork keeps the whole transcript and can switch. */
+  const forkConversation = async (id: string, title?: string): Promise<string> => {
+    const link = linkOf(store.get('links'), id)
+    if (link === undefined) return await forkThread(id, title)
+    const sources = await linkedThreads(link, id, await readThread(id))
+    const forks: Record<string, string> = {}
+    try {
+      for (const thread of Object.values(link.threads)) forks[thread] = await forkThread(thread, thread === id ? title : undefined)
+      const copies = Object.fromEntries(await Promise.all(Object.values(forks).map(async (fork): Promise<[string, readonly MessageWire[]]> => [fork, await readThread(fork)])))
+      store.set('links', [...store.get('links'), forkedLink(link, forks, sources, copies)])
+    } catch (error) {
+      await Promise.allSettled(Object.values(forks).map(async (fork) => {
+        const parsed = parseId(fork)
+        if (parsed !== undefined) await driverOf(parsed.engine, parsed.instance).delete(parsed.raw)
+      }))
+      throw error
+    }
+    return forks[id] ?? id
+  }
+  const conversationMessages = async (parsed: EngineId): Promise<{ readonly messages: readonly MessageWire[]; readonly partial: boolean }> => {
+    const page = await driverOf(parsed.engine, parsed.instance).readMessages(parsed.raw)
+    const sessionId = prefixed(parsed.engine, parsed.raw, parsed.instance)
+    const link = linkOf(store.get('links'), sessionId)
+    return { messages: link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages)), partial: page.recentTurns !== undefined }
+  }
+  route(SEEN_PATH, async (request) => {
+    const body = await request.json() as { id: string }
+    store.set('seen', { ...store.get('seen'), [body.id]: Date.now() })
+    return json({ ok: true })
+  }, 'seen', 'POST')
+  const branchReader = new BranchStatusReader(async (command, args, cwd) => (await promisify(execFile)(command === 'gh' ? resolveCommand('gh') : 'git', [...args], { cwd, timeout: 20_000, maxBuffer: 5_000_000 })).stdout)
+  route(BRANCH_STATUS_PATH, async (request) => {
+    const { targets } = await request.json() as { targets: readonly BranchTargetWire[] }
+    const states: Record<string, BranchStateWire> = {}
+    // Each row can start several git processes, so only a few rows run at one time.
+    for (let start = 0; start < targets.length; start += 6) {
+      await Promise.all(targets.slice(start, start + 6).map(async (target) => { states[target.key] = await branchReader.read(target.cwd, target.branch) }))
+    }
+    return json({ states })
+  }, 'branch status', 'POST')
+  route(DSH_IMPORT_PATH, async (request) => {
+    const body = await request.json() as DshImportBodyWire
+    const parsed = parseId(body.id)
+    if (parsed === undefined) return json({ error: 'unknown session' }, 404)
+    const host = { agents: ctx.get('agents' as never), agentPresets: ctx.get('agentPresets' as never), workspaceRegistry: ctx.get('workspaceRegistry' as never) } as unknown as DshHostServices
+    if ((host as Partial<DshHostServices>).agents === undefined) return json({ error: 'this DSH build has no agent service' }, 501)
+    const { messages } = await conversationMessages(parsed)
+    const selection = { provider: body.provider, model: body.model, ...body.effort === undefined || body.effort === '' ? {} : { reasoningEffort: body.effort } }
+    const seed = importEvents(withoutCatchup(messages), selection, Date.now())
+    if (seed.length === 0) return json({ error: 'this conversation has no text to import' }, 422)
+    const presets = host.agentPresets
+    const preset = presets === undefined ? undefined : await presets.resolve(undefined)
+    const { agent } = await host.agents.create({
+      sessionId: `session-${randomUUID()}`,
+      seed,
+      meta: { cwd: body.cwd, ...preset === undefined ? {} : { agentPreset: preset.id } },
+      agentOptions: selection,
+      ...presets === undefined || preset === undefined ? {} : { setup: async (agentCtx: Context) => { await presets.mount(agentCtx, preset.id) } },
+    })
+    await host.workspaceRegistry?.list().find(workspace => workspace.path === body.cwd)?.attachSession(agent.id).catch((error: unknown) => { console.warn('agent-bridge: imported session is not in a workspace', error) })
+    return json({ sessionId: agent.id })
+  }, 'dsh import', 'POST')
+  route(CATCHUP_PATH, async (request) => {
+    const parsed = idOf(request)
+    if (parsed === undefined) return json({ error: 'unknown session' }, 404)
+    const { messages, partial } = await conversationMessages(parsed)
+    const first = linkOf(store.get('links'), prefixed(parsed.engine, parsed.raw, parsed.instance))?.segments?.[0]?.thread
+    return json({ catchup: readableCatchup(renderCatchup(first === undefined ? parsed.engine : parseId(first)?.engine ?? parsed.engine, messages, partial)) })
+  }, 'catchup')
   route(SESSION_PATH, async (request) => {
     const parsed = idOf(request)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
-    const driver = driverOf(parsed.engine)
+    const driver = driverOf(parsed.engine, parsed.instance)
     return json(await sessionReads.run(`${parsed.engine}:${parsed.raw}`, async () => {
       const goal = await driver.readGoal(parsed.raw)
-      const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw) : parsed.engine === 'pi' ? await readPiUsage(parsed.raw) : undefined
+      const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw, claudeHome(parsed.instance)) : parsed.engine === 'pi' ? await readPiUsage(parsed.raw) : undefined
       const page = await driver.readMessages(parsed.raw)
-      return { messages: page.messages, ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
+      const sessionId = prefixed(parsed.engine, parsed.raw, parsed.instance)
+      const link = linkOf(store.get('links'), sessionId)
+      const messages = link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages))
+      return { messages: withoutCatchup(messages), ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
     }))
   }, 'session')
   route(WATCH_PATH, (request, settings) => watchResponse(request, settings.watchIntervalMs, driverOf), 'watch')
@@ -383,8 +559,11 @@ export function apply(ctx: Context, config: Config): void {
   const sendMessage = async (body: SendBodyWire, settings: Settings): Promise<{ id: string }> => {
     const parsed = body.id === undefined ? undefined : parseId(body.id)
     const engine = parsed?.engine ?? body.engine ?? 'claude'
+    const instance = parsed === undefined ? body.instance : parsed.instance
+    if (instance !== undefined && requireInstance(instance).engine !== engine) throw new HttpError(400, 'the provider instance belongs to another engine')
     // A resumed session runs in its own folder; the browser sends it, and a caller that does not is looked up.
-    const rowsOf = parsed?.engine === 'claude' ? listClaudeRows : parsed?.engine === 'pi' ? listPiRows : undefined
+    const claudeRows = async (limit: number): Promise<SessionRowWire[]> => (await listClaudeRows(limit, claudeHome(instance))).map(row => instance === undefined ? row : { ...row, id: withInstanceId(row.id, instance) })
+    const rowsOf = parsed?.engine === 'claude' ? claudeRows : parsed?.engine === 'pi' ? listPiRows : undefined
     const knownCwd = body.cwd ?? (await rowsOf?.(Math.max(settings.sessionLimit, 1000)))?.find(row => row.id === body.id)?.cwd
     const cwd = knownCwd === undefined || knownCwd === '' ? homedirOf(settings) : knownCwd
     // The engines report a missing folder as a missing executable; say what is actually wrong.
@@ -400,14 +579,15 @@ export function apply(ctx: Context, config: Config): void {
     const clearDraft = (): void => { store.set('drafts', Object.fromEntries(Object.entries(store.get('drafts')).filter(([key]) => key !== (body.id ?? '')))) }
     if (engine === 'codex') {
       if (!settings.codexEnabled) throw new HttpError(404, 'codex is disabled')
-      const id = await codex().start({
+      const id = await codexFor(instance).start({
         ...parsed === undefined ? {} : { threadId: parsed.raw },
         cwd, text, ...codexPermission(preset, { approvalPolicy: settings.codexApprovalPolicy, sandbox: settings.codexSandbox }),
         ...body.model === undefined ? {} : { model: body.model }, ...body.effort === undefined ? {} : { effort: body.effort },
+        ...body.speed === undefined ? {} : { speed: body.speed },
         images: attached.imagePaths,
       })
       clearDraft()
-      return { id: prefixed('codex', id) }
+      return { id: prefixed('codex', id, instance) }
     }
     if (engine === 'pi') {
       if (!settings.piEnabled) throw new HttpError(404, 'pi is disabled')
@@ -422,18 +602,45 @@ export function apply(ctx: Context, config: Config): void {
     }
     const memory = settings.memoryFile === '' ? '' : await readFile(settings.memoryFile, 'utf8')
     const id = await runs.start(turnOptions({ ...settings, permissionMode: claudePermission(preset, settings.permissionMode) as Settings['permissionMode'] }, parsed?.raw, text, cwd, memory, {
-      ...body.model === undefined ? {} : { model: body.model }, ...body.effort === undefined ? {} : { effort: body.effort }, images: attached.images,
+      ...body.model === undefined ? {} : { model: body.model }, ...body.effort === undefined ? {} : { effort: body.effort }, ...body.speed === undefined ? {} : { speed: body.speed }, images: attached.images, ...claudeExtras(instance),
     }))
     clearDraft()
-    return { id: prefixed('claude', id) }
+    return { id: prefixed('claude', id, instance) }
   }
-  route(SEND_PATH, async (request, settings) => json(await sendMessage(await request.json() as SendBodyWire, settings)), 'send', 'POST')
+  // One switch per source thread at a time: a second one would create a second thread for the other provider.
+  const switching = new Set<string>()
+  const sendSwitched = async (body: SendBodyWire, sourceId: string, settings: Settings): Promise<{ id: string }> => {
+    const source = parseId(sourceId)
+    const target = body.engine
+    if (source === undefined || target === undefined || body.cwd === undefined || body.cwd === '') throw new HttpError(400, 'a switch needs a source session, an engine and a working directory')
+    if (switching.has(sourceId) || driverOf(source.engine, source.instance).isRunning(source.raw)) throw new HttpError(409, 'a turn is running in this session')
+    switching.add(sourceId)
+    try {
+      const { messages } = await driverOf(source.engine, source.instance).readMessages(source.raw)
+      let plan
+      try {
+        plan = planSwitch(store.get('links'), sourceId, providerId(target, body.instance), messages)
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error))
+      }
+      const sent = await sendMessage({ ...body, ...plan.targetId === undefined ? {} : { id: plan.targetId }, text: composeSwitchPrompt(body.text, plan.catchup) }, settings)
+      // A slash command carries no catch-up, so the next message still has to.
+      store.set('links', recordSwitch(store.get('links'), sourceId, sent.id, isCommand(body.text) ? undefined : plan.deliveredThrough, plan.deliveredThrough))
+      return sent
+    } finally {
+      switching.delete(sourceId)
+    }
+  }
+  route(SEND_PATH, async (request, settings) => {
+    const body = await request.json() as SendBodyWire
+    return json(await (body.switchFrom === undefined ? sendMessage(body, settings) : sendSwitched(body, body.switchFrom, settings)))
+  }, 'send', 'POST')
   const scheduler = new Scheduler(
     store,
     async (message) => {
       await sendMessage({ id: message.sessionId, cwd: message.cwd, text: message.text, ...message.model === undefined ? {} : { model: message.model }, ...message.effort === undefined ? {} : { effort: message.effort } }, current())
     },
-    (sessionId) => { const parsed = parseId(sessionId); return parsed !== undefined && driverOf(parsed.engine).isRunning(parsed.raw) },
+    (sessionId) => { const parsed = parseId(sessionId); return parsed !== undefined && driverOf(parsed.engine, parsed.instance).isRunning(parsed.raw) },
   )
   scheduler.start()
   ctx.effect(() => () => { scheduler.stop() }, 'agent-bridge: scheduler')
@@ -451,23 +658,31 @@ export function apply(ctx: Context, config: Config): void {
   route(ANSWER_PATH, async (request) => {
     const body = await request.json() as AnswerBodyWire
     const parsed = parseId(body.id)
-    const found = parsed !== undefined && driverOf(parsed.engine).answer(parsed.raw, body.requestId, body)
+    const found = parsed !== undefined && driverOf(parsed.engine, parsed.instance).answer(parsed.raw, body.requestId, body)
     return json({ ok: found }, found ? 200 : 404)
   }, 'answer', 'POST')
   route(MANAGE_PATH, async (request) => {
     const body = await request.json() as ManageBodyWire
     const parsed = parseId(body.id)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
-    const driver = driverOf(parsed.engine)
-    if (driver.isRunning(parsed.raw)) return json({ error: 'a turn is running in this session' }, 409)
+    const driver = driverOf(parsed.engine, parsed.instance)
+    // Claude and Codex can fork a running session; Pi cannot.
+    if (driver.isRunning(parsed.raw) && (body.action !== 'fork' || parsed.engine === 'pi')) return json({ error: 'a turn is running in this session' }, 409)
     switch (body.action) {
-      case 'fork':
-        return json({ id: prefixed(parsed.engine, await driver.fork(parsed.raw)) })
+      case 'fork': {
+        const forked = await forkConversation(body.id, body.title)
+        if (parseId(forked)?.engine === 'codex') store.set('unlistedForks', [...store.get('unlistedForks'), { id: forked, title: body.title ?? '', cwd: body.cwd ?? '', updatedAt: Date.now() }])
+        return json({ id: forked })
+      }
       case 'rename':
         await driver.rename(parsed.raw, body.title ?? '')
+        store.set('unlistedForks', store.get('unlistedForks').map(fork => fork.id === body.id ? { ...fork, title: body.title ?? '' } : fork))
         return json({ ok: true })
       case 'delete':
         await driver.delete(parsed.raw)
+        store.set('links', removeThread(store.get('links'), body.id))
+        store.set('unlistedForks', store.get('unlistedForks').filter(fork => fork.id !== body.id))
+        store.set('seen', Object.fromEntries(Object.entries(store.get('seen')).filter(([id]) => id !== body.id)))
         return json({ ok: true })
     }
   }, 'manage', 'POST')
@@ -482,7 +697,7 @@ export function apply(ctx: Context, config: Config): void {
   route(INTERRUPT_PATH, async (request) => {
     const body = await request.json() as { id: string }
     const parsed = parseId(body.id)
-    const found = parsed !== undefined && await driverOf(parsed.engine).interrupt(parsed.raw)
+    const found = parsed !== undefined && await driverOf(parsed.engine, parsed.instance).interrupt(parsed.raw)
     return json({ ok: found }, found ? 200 : 404)
   }, 'interrupt', 'POST')
   const query = (request: Request, key: string): string => new URL(request.url).searchParams.get(key) ?? ''
@@ -547,15 +762,17 @@ export function apply(ctx: Context, config: Config): void {
     const asked = query(request, 'cwd') || homedirOf(settings)
     // A project folder that was deleted or moved must not break the lists: fall back to the home directory.
     const cwd = statSync(asked, { throwIfNoEntry: false })?.isDirectory() === true ? asked : homedir()
-    const key = `${engine}:${cwd}`
+    const instance = query(request, 'instance') || undefined
+    const key = `${engine}:${instance ?? ''}:${cwd}`
     // Only the newest load of a key writes the cache; a forced load or an MCP change supersedes the running one.
     const load = (force: boolean): Promise<InfoWire> => {
       const running = infoLoads.get(key)
       if (running !== undefined && !force) return running
       const asking = (): Promise<InfoWire> => {
         if (engine === 'pi') return pi().readInfo(cwd)
-        if (engine === 'codex') return codex().listModels().then(async models => ({ models, commands: [], mcp: [], account: await codex().readAccount(), defaults: await codex().readDefaults(models) }))
-        return probeInfo(turnOptions(settings, undefined, '', cwd))
+        const codexEngine = (): CodexEngine => codexFor(instance)
+        if (engine === 'codex') return codexEngine().listModels().then(async models => ({ models, commands: [], mcp: [], account: await codexEngine().readAccount(), defaults: await codexEngine().readDefaults(models) }))
+        return probeInfo(turnOptions(settings, undefined, '', cwd, '', claudeExtras(instance)))
       }
       const started: Promise<InfoWire> = asking()
         .then((info) => { if (infoLoads.get(key) === started) infoCache.set(key, { at: Date.now(), info }); return info })
@@ -597,10 +814,40 @@ export function apply(ctx: Context, config: Config): void {
     store.set('drafts', drafts)
     return json({ ok: true })
   }, 'draft', 'BOTH')
+  route(INSTANCES_PATH, async (request) => {
+    if (request.method === 'GET') return json({ instances: store.get('instances') })
+    const body = await request.json() as InstanceBodyWire
+    if (body.action === 'remove') {
+      store.set('instances', store.get('instances').filter(item => item.id !== body.id))
+      instanceDrivers.delete(body.id)
+      void codexEngines.get(body.id)?.closeAll()
+      codexEngines.delete(body.id)
+      syncClaudeSerialization()
+      return json({ instances: store.get('instances') })
+    }
+    const parsed = parseInstance(body.instance, store.get('instances'))
+    if ('error' in parsed) return json({ error: parsed.error }, 400)
+    // Codex does not start, and cannot sign in, when CODEX_HOME names a missing folder.
+    try {
+      await mkdir(expandHome(parsed.instance.home), { recursive: true })
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : String(error) }, 400)
+    }
+    store.set('instances', [...store.get('instances'), parsed.instance])
+    syncClaudeSerialization()
+    return json({ instances: store.get('instances') })
+  }, 'instances', 'BOTH')
+  route(MODEL_PREFS_PATH, async (request) => {
+    if (request.method === 'GET') return json(store.get('modelPrefs'))
+    const prefs = parseModelPrefs(await request.json())
+    if (prefs === undefined) return json({ error: 'invalid model preferences' }, 400)
+    store.set('modelPrefs', prefs)
+    return json({ ok: true })
+  }, 'model preferences', 'BOTH')
   route(CHOICE_PATH, async (request) => {
     if (request.method === 'GET') return json(store.get('choices')[query(request, 'engine')] ?? { model: '', effort: '' })
     const body = await request.json() as { engine: unknown } & Record<keyof ChoiceWire, unknown>
-    if ((body.engine !== 'claude' && body.engine !== 'codex' && body.engine !== 'pi') || typeof body.model !== 'string' || typeof body.effort !== 'string' || body.model.length > 200 || body.effort.length > 50) {
+    if (typeof body.engine !== 'string' || !/^(claude|codex|pi)(@[A-Za-z0-9_-]+)?$/.test(body.engine) || typeof body.model !== 'string' || typeof body.effort !== 'string' || body.model.length > 200 || body.effort.length > 50 || (body.speed !== undefined && (typeof body.speed !== 'string' || body.speed.length > 50))) {
       return json({ error: 'invalid choice' }, 400)
     }
     let permission
@@ -610,7 +857,7 @@ export function apply(ctx: Context, config: Config): void {
       // The reason is the one this answer already gives.
       return json({ error: 'invalid choice' }, 400)
     }
-    store.set('choices', { ...store.get('choices'), [body.engine]: { model: body.model, effort: body.effort, ...permission === undefined ? {} : { permission } } })
+    store.set('choices', { ...store.get('choices'), [body.engine]: { model: body.model, effort: body.effort, ...permission === undefined ? {} : { permission }, ...typeof body.speed === 'string' ? { speed: body.speed } : {} } })
     return json({ ok: true })
   }, 'choice', 'BOTH')
   route(ARCHIVE_PATH, async (request) => {

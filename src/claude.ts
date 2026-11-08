@@ -11,24 +11,76 @@ import {
   type BlockWire, type GoalWire, type MessageWire, type SearchHitWire, type SessionRowWire, type TodoWire, type UsageWire,
 } from './protocol.ts'
 
-/** @returns the Claude Code configuration directory the SDK reads. */
-export function claudeConfigDir(): string {
-  const configured = process.env['CLAUDE_CONFIG_DIR']
+/** Serialized SDK calls: the SDK reads `CLAUDE_CONFIG_DIR` from the process, so an added instance sets it for the length of its call. */
+let sdkQueue: Promise<unknown> = Promise.resolve()
+let serializeSdk = false
+/** The process's own value while an instance has replaced it; `swapped` says that it applies. */
+let swapped = false
+let swappedBase: string | undefined
+
+/** @param on - whether added Claude instances exist, so that SDK file calls must take turns. */
+export function serializeClaudeSdk(on: boolean): void {
+  serializeSdk = on
+}
+
+/** @returns the `CLAUDE_CONFIG_DIR` the process was started with, also while an instance call runs. */
+export function configuredClaudeDir(): string | undefined {
+  return swapped ? swappedBase : process.env['CLAUDE_CONFIG_DIR']
+}
+
+/**
+ * @param home - configuration folder of an added instance; absent is the default.
+ * @returns the Claude Code configuration directory.
+ */
+export function claudeConfigDir(home?: string): string {
+  const configured = home ?? configuredClaudeDir()
   return configured === undefined || configured === '' ? join(homedir(), '.claude') : configured
+}
+
+function setProcessDir(value: string | undefined): void {
+  if (value === undefined) delete process.env['CLAUDE_CONFIG_DIR']
+  else process.env['CLAUDE_CONFIG_DIR'] = value
+}
+
+/**
+ * Run an SDK file call against one configuration folder.
+ * @param home - folder of an added instance; absent is the default.
+ * @param work - the SDK call.
+ * @returns its result.
+ */
+function withClaudeHome<T>(home: string | undefined, work: () => Promise<T>): Promise<T> {
+  if (!serializeSdk && home === undefined) return work()
+  const run = async (): Promise<T> => {
+    if (home === undefined) return await work()
+    swappedBase = process.env['CLAUDE_CONFIG_DIR']
+    swapped = true
+    setProcessDir(home)
+    try {
+      return await work()
+    } finally {
+      setProcessDir(swappedBase)
+      swapped = false
+    }
+  }
+  const result = sdkQueue.then(run, run)
+  sdkQueue = result.catch(() => undefined)
+  return result
 }
 
 /**
  * List sessions, newest first.
  * @param limit - maximum number of rows.
+ * @param home - configuration folder of an added instance.
  * @returns rows whose ids carry the Claude prefix.
  */
-export async function listClaudeRows(limit: number): Promise<SessionRowWire[]> {
-  const sessions = await listSessions({ limit })
+export async function listClaudeRows(limit: number, home?: string): Promise<SessionRowWire[]> {
+  const sessions = await withClaudeHome(home, () => listSessions({ limit }))
   return sessions.map(info => ({
     id: `${CLAUDE_ID_PREFIX}${info.sessionId}`,
     title: info.customTitle ?? info.summary ?? info.firstPrompt ?? info.sessionId,
     cwd: info.cwd ?? '',
     updatedAt: info.lastModified,
+    ...info.gitBranch === undefined ? {} : { branch: info.gitBranch },
   }))
 }
 
@@ -116,8 +168,8 @@ function toBlocks(content: unknown): BlockWire[] {
  * @param sessionId - Claude session UUID (no prefix).
  * @returns user and assistant messages in file order.
  */
-export async function readClaudeMessages(sessionId: string): Promise<MessageWire[]> {
-  return toTranscript(await getSessionMessages(sessionId))
+export async function readClaudeMessages(sessionId: string, home?: string): Promise<MessageWire[]> {
+  return toTranscript(await withClaudeHome(home, () => getSessionMessages(sessionId)))
 }
 
 /** A whole message that is one background-task notification, which Claude Code writes as a user message to wake the model. */
@@ -143,10 +195,10 @@ export function toTranscript(entries: readonly { type: string; uuid: string; mes
  * @param sessionId - Claude session UUID (no prefix).
  * @returns absolute path, or undefined when no project folder holds it.
  */
-export async function findClaudeFile(sessionId: string): Promise<string | undefined> {
+export async function findClaudeFile(sessionId: string, home?: string): Promise<string | undefined> {
   if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return undefined
-  const projects = join(claudeConfigDir(), 'projects')
-  const folders = await readdir(projects)
+  const projects = join(claudeConfigDir(home), 'projects')
+  const folders = await readdir(projects).catch(() => [])
   for (const folder of folders) {
     const candidate = join(projects, folder, `${sessionId}.jsonl`)
     const exists = await stat(candidate).then(() => true, () => false)
@@ -163,8 +215,8 @@ const GOAL_CLEAR = /^(clear|stop|off|reset|none|cancel)$/i
  * @param sessionId - Claude session UUID (no prefix).
  * @returns the active goal, or undefined when none is set or it was met or cleared.
  */
-export async function readClaudeGoal(sessionId: string): Promise<GoalWire | undefined> {
-  const file = await findClaudeFile(sessionId)
+export async function readClaudeGoal(sessionId: string, home?: string): Promise<GoalWire | undefined> {
+  const file = await findClaudeFile(sessionId, home)
   if (file === undefined) return undefined
   let goal: GoalWire | undefined
   for (const line of (await readFile(file, 'utf8')).split('\n')) {
@@ -188,12 +240,14 @@ export async function readClaudeGoal(sessionId: string): Promise<GoalWire | unde
 }
 
 /**
- * Fork a session into a new one with the full transcript.
+ * Fork a session into a new one.
  * @param sessionId - source session UUID (no prefix).
+ * @param home - config folder of an instance.
+ * @param options - title of the fork, and the last message to copy; the default copies the full transcript.
  * @returns the new session UUID.
  */
-export async function forkClaudeSession(sessionId: string): Promise<string> {
-  return (await forkSession(sessionId)).sessionId
+export async function forkClaudeSession(sessionId: string, home?: string, options: { readonly title?: string; readonly upToMessageId?: string } = {}): Promise<string> {
+  return (await withClaudeHome(home, () => forkSession(sessionId, options))).sessionId
 }
 
 /**
@@ -201,16 +255,16 @@ export async function forkClaudeSession(sessionId: string): Promise<string> {
  * @param sessionId - session UUID (no prefix).
  * @param title - new title.
  */
-export async function renameClaudeSession(sessionId: string, title: string): Promise<void> {
-  await renameSession(sessionId, title)
+export async function renameClaudeSession(sessionId: string, title: string, home?: string): Promise<void> {
+  await withClaudeHome(home, () => renameSession(sessionId, title))
 }
 
 /**
  * Delete a session's transcript file.
  * @param sessionId - session UUID (no prefix).
  */
-export async function deleteClaudeSession(sessionId: string): Promise<void> {
-  await deleteSession(sessionId)
+export async function deleteClaudeSession(sessionId: string, home?: string): Promise<void> {
+  await withClaudeHome(home, () => deleteSession(sessionId))
 }
 
 /**
@@ -218,8 +272,8 @@ export async function deleteClaudeSession(sessionId: string): Promise<void> {
  * @param sessionId - Claude session UUID (no prefix).
  * @returns the totals, or undefined when the file has no usage records.
  */
-export async function readClaudeUsage(sessionId: string): Promise<UsageWire | undefined> {
-  const file = await findClaudeFile(sessionId)
+export async function readClaudeUsage(sessionId: string, home?: string): Promise<UsageWire | undefined> {
+  const file = await findClaudeFile(sessionId, home)
   if (file === undefined) return undefined
   const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   let seen = false

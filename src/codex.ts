@@ -22,6 +22,8 @@ export interface CodexTurnOptions {
   /** Model and reasoning effort for this turn; undefined keeps the thread's. */
   readonly model?: string
   readonly effort?: string
+  /** Service tier, or empty for standard speed; undefined keeps the thread's. */
+  readonly speed?: string
   /** Absolute paths of images sent with the message. */
   readonly images?: readonly string[]
 }
@@ -41,6 +43,12 @@ interface RpcMessage {
 
 type Json = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any -- app-server payloads are read field by field at the wire boundary
 
+/** How an added instance starts its app-server. */
+export interface CodexLaunch {
+  readonly env?: Readonly<Record<string, string>>
+  readonly args?: readonly string[]
+}
+
 class CodexRpc {
   private child: ChildProcess | undefined
   private ready: Promise<void> | undefined
@@ -51,6 +59,7 @@ class CodexRpc {
   constructor(
     private readonly executable: string,
     private readonly onMessage: (message: RpcMessage) => void,
+    private readonly launch: CodexLaunch = {},
   ) {}
 
   private send(payload: Record<string, unknown>): void {
@@ -68,9 +77,9 @@ class CodexRpc {
   private ensure(): Promise<void> {
     if (this.ready !== undefined) return this.ready
     const name = userInfo().username
-    const child = spawn(this.executable, ['app-server'], {
+    const child = spawn(this.executable, ['app-server', ...this.launch.args ?? []], {
       stdio: ['pipe', 'pipe', 'ignore'],
-      env: { ...process.env, USER: process.env['USER'] ?? name, LOGNAME: process.env['LOGNAME'] ?? name },
+      env: { ...process.env, USER: process.env['USER'] ?? name, LOGNAME: process.env['LOGNAME'] ?? name, ...this.launch.env },
     })
     this.child = child
     child.stdout?.setEncoding('utf8')
@@ -211,6 +220,15 @@ function toMessages(item: Json): MessageWire[] {
 }
 
 /** Codex sessions: reading, live turns, and management over one app-server process. */
+
+/** The tier of a `model/list` entry that selects fast mode: newer Codex lists `serviceTiers`, older Codex `additionalSpeedTiers`. */
+function fastTierOfModel(model: Json): { fastTier?: string } {
+  const tiers = ((model['serviceTiers'] as Json[] | undefined) ?? []).map(tier => String(tier['id']))
+  const ids = tiers.length > 0 ? tiers : ((model['additionalSpeedTiers'] as string[] | undefined) ?? [])
+  const tier = ids.find(id => id === 'fast') ?? ids.find(id => id === 'priority')
+  return tier === undefined ? {} : { fastTier: tier }
+}
+
 export class CodexEngine {
   private readonly rpc: CodexRpc
   private readonly hub = new LiveHub()
@@ -220,9 +238,10 @@ export class CodexEngine {
 
   /**
    * @param executable - path of the `codex` executable.
+   * @param launch - environment and arguments of an added instance.
    */
-  constructor(executable: string) {
-    this.rpc = new CodexRpc(executable, message => { this.onMessage(message) })
+  constructor(executable: string, launch: CodexLaunch = {}) {
+    this.rpc = new CodexRpc(executable, message => { this.onMessage(message) }, launch)
   }
 
   /**
@@ -231,12 +250,16 @@ export class CodexEngine {
    */
   async listRows(limit: number): Promise<SessionRowWire[]> {
     const result = await this.rpc.call('thread/list', { limit, sortKey: 'updated_at' })
-    return (result['data'] as Json[]).map(thread => ({
-      id: `${CODEX_ID_PREFIX}${String(thread['id'])}`,
-      title: String(thread['name'] ?? thread['preview'] ?? thread['id']),
-      cwd: String(thread['cwd'] ?? ''),
-      updatedAt: seconds(thread['updatedAt']),
-    }))
+    return (result['data'] as Json[]).map((thread) => {
+      const branch = thread['gitInfo']?.['branch'] as string | null | undefined
+      return {
+        id: `${CODEX_ID_PREFIX}${String(thread['id'])}`,
+        title: String(thread['name'] ?? thread['preview'] ?? thread['id']),
+        cwd: String(thread['cwd'] ?? ''),
+        updatedAt: seconds(thread['updatedAt']),
+        ...branch === null || branch === undefined ? {} : { branch },
+      }
+    })
   }
 
   /** @returns the models Codex offers to this account. */
@@ -248,6 +271,7 @@ export class CodexEngine {
       description: String(model['description'] ?? ''),
       efforts: ((model['supportedReasoningEfforts'] as Json[] | undefined) ?? []).map(item => String(item['reasoningEffort'] ?? item)),
       ...model['isDefault'] === true ? { isDefault: true } : {},
+      ...fastTierOfModel(model),
     }))
   }
 
@@ -362,6 +386,7 @@ export class CodexEngine {
       ...settings,
       ...options.model === undefined || options.model === '' ? {} : { model: options.model },
       ...options.effort === undefined || options.effort === '' ? {} : { effort: options.effort },
+      ...options.speed === undefined ? {} : { serviceTier: options.speed === '' ? null : options.speed },
     })
     this.ensureRun(threadId).turnId = String(response['turn']['id'])
     return threadId

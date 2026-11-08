@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { engineOf, graftWorkspaceBrowser, mergeList, mergeWorkspaceState, mergeWorkspaces } from '../src/client/graft.tsx'
+import { engineOf, EXTERNAL_PREFIX, graftWorkspaceBrowser, mergeList, mergeWorkspaceState, mergeWorkspaces } from '../src/client/graft.tsx'
 
 const external = {
   rows: [
@@ -144,4 +144,11 @@ test('the dsh 0.2.2 browser, whose row menu moved out of it, is grafted and its 
   assert.equal(pin.component({ sessionId: 'session-1', useSessionAccess: hostAccess }).props.useSessionAccess, hostAccess, 'a Host row keeps the Host check')
   undo()
   assert.equal(browser.component, Browser)
+})
+
+test('the Workspace browser does not list the new-session drafts', () => {
+  const external = { rows: [{ id: 'claude:new', title: '+ New', cwd: '/w', updatedAt: 1 }, { id: 'codex:new', title: '+ New', cwd: '/w', updatedAt: 1 }, { id: 'claude:a', title: 'A', cwd: '/w', updatedAt: 1 }] }
+  const merged = mergeList({ ids: [], byId: {} }, external, false)
+  assert.deepEqual(merged.ids.map(id => id.slice(EXTERNAL_PREFIX.length)), ['claude:a'])
+  assert.deepEqual(mergeWorkspaces([{ path: '/w', sessionIds: [] }], external)[0].sessionIds.map(id => id.slice(EXTERNAL_PREFIX.length)), ['claude:a'])
 })

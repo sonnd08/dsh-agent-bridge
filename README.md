@@ -6,6 +6,21 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 
 > Unofficial community plugin. Not affiliated with DeepSeek, Anthropic or OpenAI.
 
+## What's new
+
+### 0.3.0
+
+<img src="docs/images/whats-new-0.3.0.png" alt="A mock-up of the provider selector, the Add provider dialog, the sidebar row indicators and a conversation that moves between providers." width="900">
+
+The image is a mock-up with invented data.
+
+- **Provider selector.** Select the provider, model, reasoning level, speed and access in one popup. Favorites, model order, hidden models and custom models are in Settings → Agent Bridge.
+- **More than one account.** Add Claude and Codex instances. Each instance has its own home folder, login and sessions.
+- **Switch provider in a conversation.** Claude and Codex share one transcript.
+- **Continue on DeepSeek.** Select a DeepSeek Harness model in an open chat. The new session shows the old messages and sends them to the model as history.
+- **Fork session.** Claude and Codex use their own fork, and a fork keeps a switched conversation whole.
+- **Row indicators.** Rows show unread activity and the branch state.
+
 ## Features
 
 - **One sidebar for all your agents.** Claude Code and Codex sessions are listed in the stock DSH Workspace browser under their project folder, with a small Claude or Codex mark on each row.
@@ -13,6 +28,13 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 - **Continue any session.** Opening a row shows the full transcript. You can send messages, stop a turn, answer permission prompts and questions, pick the model and reasoning effort, and attach images. Claude runs through the Claude Agent SDK and Codex through `codex app-server`, so the sessions stay compatible with the CLIs.
 - **Same controls as DSH.** Enter sends and Shift+Enter starts a new line. A running session shows DSH's own spinner in its row, and a "Working for N s" line stays under your message until the turn ends. For Claude and Codex, the permission menu beside the attach button chooses Default (ask each time), Read Only, Workspace Write or Full Access; Full Access needs confirming first, the choice is kept per engine, and scheduled messages always use Default. Claude's thinking summaries appear above its replies once each thinking block completes.
 - **Start new sessions** in any folder, or clone a repository first.
+- **Provider selector.** The model button shows a provider rail, a model search and a reasoning column. On a new chat, select Claude or Codex to start that provider's session from the DSH composer. The footer of the selector has Standard / Fast and the access control, and the chat bar shows the current access and a Fast mark.
+- **Model management.** Settings → Agent Bridge reorders models, hides the ones you do not use, marks favorites, and adds custom model IDs for Claude and Codex.
+- **More than one Claude or Codex account.** Settings → Agent Bridge → **+ Add provider** adds an instance with its own home folder (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), login and sessions. The DeepSeek Harness models are always in the provider list. To sign in to an instance, run the command that its settings page shows. A removal does not delete the home folder.
+- **Switch provider in a conversation.** Select the other provider in an open Claude or Codex session. The next message goes to that provider's thread, with the user and assistant text it has not seen. Tool calls and tool results are not passed on. The two threads show as one row.
+- **Continue on a DeepSeek model.** Select a DeepSeek Harness model in an open Claude or Codex chat. The next message starts a new DSH session that shows the old messages and sends them to the model as history. The old chat stays in the list. Tool calls, thinking and attachments do not move.
+- **Row indicators.** A blue dot shows a Claude or Codex session that changed after you last opened it. An icon shows if the branch of the session is merged (purple), has an open pull request (green) or has commits that are not merged (gray). Pull request states need the GitHub CLI `gh`.
+- **Fork a session.** The row menu has **Fork session**. Claude and Codex use their own fork, and DeepSeek Harness sessions use the DSH fork. A fork of a conversation that switched provider keeps the whole transcript.
 - **Search the contents of every session.**
 - **Workbench tabs** next to each conversation:
   - Terminal.

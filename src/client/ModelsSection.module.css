@@ -1,0 +1,524 @@
+.page {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+
+.title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.engines {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--dsw-alias-border-l2);
+}
+
+.engine,
+.engineActive {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.engineActive {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.engineSelect {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.engineHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.engineMark[data-engine] {
+  display: block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.engineStatus {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.favoritesMark {
+  flex: none;
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.switchSpace {
+  width: 36px;
+  flex: none;
+}
+
+.modelsTitle {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.content {
+  min-width: 0;
+  padding: 14px;
+}
+
+.hint {
+  margin: 0 0 10px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.tools,
+.addRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.filter {
+  box-sizing: border-box;
+  min-width: 180px;
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.action {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.action:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.count {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.error {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.group {
+  margin: 14px 0 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row,
+.rowHidden {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.rowHidden .name,
+.rowHidden .slug {
+  opacity: 0.45;
+}
+
+.name {
+  white-space: nowrap;
+}
+
+.slug {
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.star,
+.starOn,
+.arrow,
+.remove {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.starOn {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* As wide as the switch of a listed model, so that the arrows of all rows align. */
+.remove {
+  width: 36px;
+}
+
+.arrow:hover:not(:disabled),
+.remove:hover,
+.star:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.switchOn,
+.switchOff {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: none;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.switchOn {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.switchOff {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.switchOn span,
+.switchOff span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-base);
+}
+
+.switchOff span {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.switchOn span {
+  left: 19px;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.titleRow .title {
+  margin-bottom: 12px;
+}
+
+.titleAdd {
+  margin-bottom: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 18px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.accentDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+}
+
+.addProvider {
+  padding: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.addProvider:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.instanceBar {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 14px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.loginCommand {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+}
+
+.dialogBackdrop {
+  position: fixed;
+  z-index: 3000;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 55%);
+  inset: 0;
+}
+
+.dialog {
+  position: relative;
+  box-sizing: border-box;
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 20px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  overflow-y: auto;
+}
+
+.dialogClose {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.dialogTitle {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  list-style: none;
+}
+
+.step,
+.stepActive {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.stepActive {
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+}
+
+.step span,
+.stepActive span {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 50%;
+  font-size: 11px;
+}
+
+.providerChoices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.providerChoice,
+.providerChoiceActive {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.providerChoiceActive {
+  border-color: var(--dsw-alias-state-business-primary);
+}
+
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  align-items: center;
+  gap: 12px;
+}
+
+.field > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.field b {
+  font-weight: 500;
+}
+
+.field small {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.field input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.swatches {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.swatch,
+.swatchActive,
+.swatchNone,
+.swatchNoneActive {
+  width: 22px;
+  height: 22px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.swatchNone,
+.swatchNoneActive {
+  background: transparent;
+  border-color: var(--dsw-alias-border-l2);
+}
+
+.swatchActive,
+.swatchNoneActive {
+  border-color: var(--dsw-alias-label-primary);
+}
+
+.dialogFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.dialogButton,
+.dialogPrimary {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.dialogPrimary {
+  border-color: transparent;
+  background: var(--dsw-alias-state-business-primary);
+  color: #fff;
+}
+
+.dialogPrimary:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
