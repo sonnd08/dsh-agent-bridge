@@ -21,7 +21,8 @@ import { loadInfo } from './info.ts'
 import { engineLabels } from './model-names.ts'
 import type { DshSwitchRequest } from './ExternalPanel.tsx'
 import { composeSwitchPrompt } from '../links.ts'
-import { ARCHIVE_PATH, CATCHUP_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, draftIdFor, engineOfSession, CHOICE_PATH, type ChoiceWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
+import { publishRowIndicators, RowIndicators, type RowIndicator } from './RowIndicators.tsx'
+import { ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, DSH_IMPORT_PATH, SEEN_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, draftIdFor, engineOfSession, CHOICE_PATH, type ChoiceWire, type DshImportBodyWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
 import { applyEngineMarks } from './branding.tsx'
 import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
@@ -62,9 +63,11 @@ interface SeatContext {
       subscribe(listener: () => void): () => void
     }
     create(options: { readonly cwd: string }): Promise<string>
+    refresh(): Promise<void>
   }
   readonly remote: {
     readonly session: {
+      rename(request: { readonly sessionId: string; readonly title: string }): Promise<RemoteOutcome>
       selectModel(selection: { readonly sessionId: string; readonly provider: string; readonly model: string; readonly reasoningEffort?: string }): Promise<RemoteOutcome>
       prompt(request: { readonly requestId: string; readonly sessionId: string; readonly mode: 'queue'; readonly content: readonly { readonly type: 'text'; readonly text: string }[]; readonly clientTimeZone: string }): Promise<RemoteOutcome>
     }
@@ -122,7 +125,7 @@ interface ContextMenus {
 }
 
 function toRow(wire: SessionRowWire): SessionRow {
-  return { id: wire.id, title: wire.title, cwd: wire.cwd, updatedAt: wire.updatedAt }
+  return { id: wire.id, title: wire.title, cwd: wire.cwd, updatedAt: wire.updatedAt, branch: wire.branch, unread: wire.unread }
 }
 
 /**
@@ -232,8 +235,44 @@ export function apply(ctx: ClientContext): void {
   }
   let pendingCwd: string | undefined
   const takePendingCwd = (): string | undefined => { const value = pendingCwd; pendingCwd = undefined; return value }
+  const branchStates = new Map<string, BranchStateWire>()
+  let nativeBranchTargets: () => readonly BranchTargetWire[] = () => []
+  let branchesReadAt = 0
+  const publishIndicators = (): void => {
+    const next = new Map<string, RowIndicator>()
+    for (const [key, branch] of branchStates) next.set(key, { unread: false, branch })
+    for (const row of wireRows) {
+      const key = `${EXTERNAL_PREFIX}${row.id}`
+      next.set(key, { unread: row.unread === true, branch: branchStates.get(key) ?? 'none' })
+    }
+    publishRowIndicators(next)
+  }
+  const refreshBranches = async (): Promise<void> => {
+    branchesReadAt = Date.now()
+    const targets: BranchTargetWire[] = [
+      ...wireRows.map(row => ({ key: `${EXTERNAL_PREFIX}${row.id}`, cwd: row.cwd, ...row.branch === undefined ? {} : { branch: row.branch } })),
+      ...nativeBranchTargets(),
+    ]
+    try {
+      const response = await postJson(BRANCH_STATUS_PATH, { targets })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const { states } = await response.json() as { states: Record<string, BranchStateWire> }
+      branchStates.clear()
+      for (const [key, state] of Object.entries(states)) branchStates.set(key, state)
+      publishIndicators()
+    } catch (error) {
+      console.warn('agent-bridge: branch states failed', error)
+    }
+  }
+  const markSeen = (id: string): void => {
+    if (isDraft(id)) return
+    wireRows = wireRows.map(row => row.id === id ? { ...row, unread: false } : row)
+    publishIndicators()
+    void postJson(SEEN_PATH, { id }).catch((error: unknown) => { console.warn('agent-bridge: seen state failed', error) })
+  }
   const open = (id: string): void => {
     selectedId = id
+    markSeen(id)
     publish()
     transcript.open(id)
     ctx.layout.selectPanel(PANEL_ID as MainPanelId)
@@ -264,6 +303,10 @@ export function apply(ctx: ClientContext): void {
       wireRows = [...[...created.values()].filter(row => !listed.some(item => item.id === row.id)), ...listed]
       rows = [...draftRows(), ...wireRows]
       publish()
+      // The open session has no unseen activity.
+      if (selectedId !== undefined && wireRows.some(row => row.id === selectedId && row.unread === true)) markSeen(selectedId)
+      publishIndicators()
+      if (Date.now() - branchesReadAt > 60_000) void refreshBranches()
     } catch (error) {
       console.warn('agent-bridge: session list failed', error)
     }
@@ -321,6 +364,11 @@ export function apply(ctx: ClientContext): void {
       id: 'agent-bridge.mark',
       order: -100,
     }, EngineMark)), 'agent-bridge: engine mark on browser rows')
+    ctx.effect(() => slots.inject('sidebar.session.row.trailing', () => slots.register({
+      name: 'sidebar.session.row.trailing',
+      id: 'agent-bridge.indicators',
+      locale: NS,
+    }, RowIndicators)), 'agent-bridge: unread and branch indicators on browser rows')
   }
   const scope = ctx.configForms.get<ExternalEnginesSection>(ENTRY_ID)
   const alwaysAllow = async (tool: string): Promise<void> => {
@@ -425,17 +473,35 @@ export function apply(ctx: ClientContext): void {
     }
     seatCtx.effect(() => {
       const { remote } = seatCtx as unknown as SeatContext
-      // DSH has no history import, so the first message of the new session carries the conversation as text.
-      startDshSession = async ({ fromId, text, cwd, modelId, effort }) => {
+      nativeBranchTargets = () => Object.entries(sessions.list.getSnapshot().byId).flatMap(([key, session]) => session?.cwd === undefined || session.blank === true ? [] : [{ key, cwd: session.cwd }])
+      void refreshBranches()
+      /** A DSH build that refuses the history falls back to a new session whose first message carries it as text. */
+      const emptySessionWithCatchup = async (fromId: string, text: string, cwd: string): Promise<{ sessionId: string; prompt: string } | string> => {
+        const response = await fetch(`${CATCHUP_PATH}?${new URLSearchParams({ id: fromId }).toString()}`, { credentials: 'same-origin' })
+        if (!response.ok) return ((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`
+        const { catchup } = await response.json() as { catchup: string }
+        return { sessionId: await sessions.create({ cwd }), prompt: composeSwitchPrompt(text, catchup) }
+      }
+      startDshSession = async ({ fromId, title, text, cwd, modelId, effort }) => {
         try {
-          const response = await fetch(`${CATCHUP_PATH}?${new URLSearchParams({ id: fromId }).toString()}`, { credentials: 'same-origin' })
-          if (!response.ok) return ((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`
-          const { catchup } = await response.json() as { catchup: string }
-          const sessionId = await sessions.create({ cwd })
           const provider = modelId.slice(0, modelId.indexOf('/'))
-          const selected = await remote.session.selectModel({ sessionId, provider, model: modelId.slice(provider.length + 1), ...effort === '' ? {} : { reasoningEffort: effort } })
+          const model = modelId.slice(provider.length + 1)
+          const imported = await fetch(DSH_IMPORT_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: fromId, cwd, provider, model, ...effort === '' ? {} : { effort } } satisfies DshImportBodyWire) })
+          let target: { sessionId: string; prompt: string } | string
+          if (imported.ok) {
+            target = { sessionId: (await imported.json() as { sessionId: string }).sessionId, prompt: text }
+            await sessions.refresh()
+            const renamed = await remote.session.rename({ sessionId: target.sessionId, title })
+            if (!renamed.ok) console.warn('agent-bridge: imported session title failed', renamed.error.message)
+          } else {
+            console.warn('agent-bridge: history import failed, using catch-up text', await imported.text())
+            target = await emptySessionWithCatchup(fromId, text, cwd)
+          }
+          if (typeof target === 'string') return target
+          const { sessionId } = target
+          const selected = await remote.session.selectModel({ sessionId, provider, model, ...effort === '' ? {} : { reasoningEffort: effort } })
           if (!selected.ok) return selected.error.message
-          const sent = await remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: composeSwitchPrompt(text, catchup) }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+          const sent = await remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: target.prompt }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
           if (!sent.ok) return sent.error.message
           ;(ctx.uiWorkspace as unknown as { openSession(id: string): void }).openSession(sessionId)
           return undefined
@@ -443,7 +509,7 @@ export function apply(ctx: ClientContext): void {
           return error instanceof Error ? error.message : String(error)
         }
       }
-      return () => { startDshSession = undefined }
+      return () => { startDshSession = undefined; nativeBranchTargets = () => [] }
     }, 'agent-bridge: switch to a DSH session')
     const seatSlots = slots as unknown as SeatSlots
     seatCtx.effect(() => seatSlots.inject('conversation.input.model', () => seatSlots.register({
@@ -495,6 +561,12 @@ export function apply(ctx: ClientContext): void {
     lastLimit = limit
     void refresh()
   }), 'agent-bridge: relist on settings change')
+  ctx.effect(() => {
+    const branches = window.setInterval(() => { void refreshBranches() }, 120_000)
+    // Sessions also change in other apps, so the unread state cannot wait for a turn here.
+    const list = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh() }, 30_000)
+    return () => { window.clearInterval(branches); window.clearInterval(list) }
+  }, 'agent-bridge: follow branch and unread states')
   ctx.effect(() => {
     const timer = window.setInterval(() => { if (running.size > 0) void refresh() }, 4000)
     return () => { window.clearInterval(timer) }

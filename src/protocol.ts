@@ -8,6 +8,10 @@ export const PANEL_ID = 'agent-bridge'
 
 /** Authenticated route listing the session rows. */
 export const SESSIONS_PATH = '/api/agent-bridge/sessions'
+/** Records that the user opened a session. */
+export const SEEN_PATH = '/api/agent-bridge/seen'
+/** Branch states of session rows. */
+export const BRANCH_STATUS_PATH = '/api/agent-bridge/branch-status'
 
 /** Authenticated route returning one session's messages (`?id=`). */
 export const SESSION_PATH = '/api/agent-bridge/session'
@@ -128,6 +132,20 @@ export interface SessionRowWire {
   readonly title: string
   readonly cwd: string
   readonly updatedAt: number
+  /** Branch that the session recorded. */
+  readonly branch?: string
+  /** The session has activity that the user has not opened. */
+  readonly unread?: boolean
+}
+
+/** State of the branch of a session: `none` when there is nothing to show. */
+export type BranchStateWire = 'merged' | 'open' | 'unmerged' | 'none'
+
+/** One row whose branch state the client asks for. */
+export interface BranchTargetWire {
+  readonly key: string
+  readonly cwd: string
+  readonly branch?: string
 }
 
 /** One content block of a transcript message. */
@@ -383,6 +401,18 @@ export const SEARCH_PATH = '/api/agent-bridge/search'
 export const DRAFT_PATH = '/api/agent-bridge/draft'
 export const CHOICE_PATH = '/api/agent-bridge/choice'
 export const ARCHIVE_PATH = '/api/agent-bridge/archive'
+/** Creates a DSH session that holds the history of a conversation. */
+export const DSH_IMPORT_PATH = '/api/agent-bridge/dsh-import'
+
+/** Body of the DSH import route. */
+export interface DshImportBodyWire {
+  readonly id: string
+  readonly cwd: string
+  readonly provider: string
+  readonly model: string
+  readonly effort?: string
+}
+
 /** Catch-up text of a conversation, for a provider that the bridge does not run. */
 export const CATCHUP_PATH = '/api/agent-bridge/catchup'
 /** Authenticated POST route pinning or unpinning a session in the Workspace browser (`{id, pinned}`). */

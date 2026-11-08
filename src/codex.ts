@@ -250,12 +250,16 @@ export class CodexEngine {
    */
   async listRows(limit: number): Promise<SessionRowWire[]> {
     const result = await this.rpc.call('thread/list', { limit, sortKey: 'updated_at' })
-    return (result['data'] as Json[]).map(thread => ({
-      id: `${CODEX_ID_PREFIX}${String(thread['id'])}`,
-      title: String(thread['name'] ?? thread['preview'] ?? thread['id']),
-      cwd: String(thread['cwd'] ?? ''),
-      updatedAt: seconds(thread['updatedAt']),
-    }))
+    return (result['data'] as Json[]).map((thread) => {
+      const branch = thread['gitInfo']?.['branch'] as string | null | undefined
+      return {
+        id: `${CODEX_ID_PREFIX}${String(thread['id'])}`,
+        title: String(thread['name'] ?? thread['preview'] ?? thread['id']),
+        cwd: String(thread['cwd'] ?? ''),
+        updatedAt: seconds(thread['updatedAt']),
+        ...branch === null || branch === undefined ? {} : { branch },
+      }
+    })
   }
 
   /** @returns the models Codex offers to this account. */

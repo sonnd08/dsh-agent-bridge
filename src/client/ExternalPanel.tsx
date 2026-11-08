@@ -35,6 +35,8 @@ import css from './ExternalPanel.module.css'
 /** A message that moves an open conversation to a new DSH session. */
 export interface DshSwitchRequest {
   readonly fromId: string
+  /** Title of the conversation, which the new session keeps. */
+  readonly title: string
   readonly text: string
   readonly cwd: string
   /** `provider/model` of the DSH catalog. */
@@ -276,7 +278,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
     if (dshTarget !== undefined && transcript.sessionId !== undefined) {
       const fromId = transcript.sessionId
       setText('')
-      void startDshSession({ fromId, text: message, cwd: selected?.cwd ?? shownCwd, modelId: dshTarget.modelId, effort: dshTarget.effort }).then((failure) => {
+      void startDshSession({ fromId, title: selected?.title ?? '', text: message, cwd: selected?.cwd ?? shownCwd, modelId: dshTarget.modelId, effort: dshTarget.effort }).then((failure) => {
         if (failure === undefined) {
           void fetch(DRAFT_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: fromId, text: '' }) }).catch(() => {})
           return

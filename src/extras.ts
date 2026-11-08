@@ -35,6 +35,8 @@ export interface PersistedState {
   instances: ProviderInstanceWire[]
   /** Forks that the engine does not list yet. */
   unlistedForks: SessionRowWire[]
+  /** When the user last opened each listed session, in milliseconds. */
+  seen: Record<string, number>
 }
 
 /** A message waiting to be sent to a session at a time. */
@@ -67,7 +69,7 @@ export function defaultStatePath(plugin: 'agent-bridge' | 'external-engines' = '
 export class StateStore {
   private state: PersistedState
   constructor(private readonly path: string, legacyPath?: string) {
-    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [], links: [], modelPrefs: NO_MODEL_PREFS, instances: [], unlistedForks: [] }
+    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [], links: [], modelPrefs: NO_MODEL_PREFS, instances: [], unlistedForks: [], seen: {} }
     const source = legacyPath !== undefined && !existsSync(path) ? legacyPath : path
     try {
       this.state = { ...this.state, ...JSON.parse(readFileSync(source, 'utf8')) as Partial<PersistedState> }

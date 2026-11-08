@@ -4,6 +4,7 @@
  * and a change feed for the transcript file.
  * @module dsh-agent-bridge
  */
+import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { mkdir, readFile } from 'node:fs/promises'
@@ -29,6 +30,8 @@ import { startHeapWatch } from './diagnostics.ts'
 import { createSingleFlight } from './single-flight.ts'
 import { parseModelPrefs } from './model-prefs.ts'
 import { completedPrefix, forkedLink, mergeUnlistedForks } from './fork.ts'
+import { importEvents, type SeedEvent } from './dsh-import.ts'
+import { BranchStatusReader } from './branch-status.ts'
 import { claudeExtraArgs, expandHome, parseInstance, splitLaunchArgs } from './instances.ts'
 import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, isCommand, linkOf, mergeLinkedMessages, planSwitch, readableCatchup, recordSwitch, removeThread, renderCatchup, withoutCatchup, type ThreadLink } from './links.ts'
 import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig } from './extras.ts'
@@ -37,7 +40,7 @@ import {
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, CATCHUP_PATH, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -251,6 +254,13 @@ function liveResponse(request: Request, driverOf: (engine: EngineName, instance?
  * @param ctx - plugin context.
  * @param config - configuration from the composition entry.
  */
+/** Host services that create a DSH session with history; their types belong to the harness packages. */
+interface DshHostServices {
+  readonly agents: { create(options: { sessionId: string; seed: readonly SeedEvent[]; meta: { cwd: string; agentPreset?: string }; agentOptions: { provider: string; model: string; reasoningEffort?: string }; setup?: (agentCtx: Context) => Promise<void> }): Promise<{ readonly agent: { readonly id: string } }> }
+  readonly agentPresets?: { resolve(id: undefined): Promise<{ readonly id: string }>; mount(agentCtx: Context, id: string): Promise<void> }
+  readonly workspaceRegistry?: { list(): readonly { readonly path: string; attachSession(id: string): Promise<void> }[] }
+}
+
 export function apply(ctx: Context, config: Config): void {
   const current = (): Settings => {
     const settings = config.get() as Settings
@@ -427,7 +437,11 @@ export function apply(ctx: Context, config: Config): void {
       const parsed = parseId(row.id)
       return parsed !== undefined && driverOf(parsed.engine, parsed.instance).isRunning(parsed.raw)
     }).map(row => row.id)
-    return json({ sessions: rows, running, pinned: store.get('pinned'), defaultCwd: homedirOf(settings), codexEnabled: settings.codexEnabled, // A bare name means the command was not found, so no new-session entry is offered.
+    const marks = store.get('seen')
+    // A session is unread only after the first listing, so that a new install does not mark every row.
+    if (!wantArchived && rows.some(row => marks[row.id] === undefined)) store.set('seen', Object.fromEntries(rows.map(row => [row.id, marks[row.id] ?? row.updatedAt])))
+    const sessions = rows.map(row => ({ ...row, unread: marks[row.id] !== undefined && row.updatedAt > (marks[row.id] as number) && !running.includes(row.id) }))
+    return json({ sessions, running, pinned: store.get('pinned'), defaultCwd: homedirOf(settings), codexEnabled: settings.codexEnabled, // A bare name means the command was not found, so no new-session entry is offered.
       piEnabled: settings.piEnabled && settings.piExecutable.includes('/'), warnings })
   }, 'sessions')
   // A transcript can be tens of megabytes; requests that arrive while it is being read share that read.
@@ -476,15 +490,55 @@ export function apply(ctx: Context, config: Config): void {
     }
     return forks[id] ?? id
   }
-  route(CATCHUP_PATH, async (request) => {
-    const parsed = idOf(request)
-    if (parsed === undefined) return json({ error: 'unknown session' }, 404)
+  const conversationMessages = async (parsed: EngineId): Promise<{ readonly messages: readonly MessageWire[]; readonly partial: boolean }> => {
     const page = await driverOf(parsed.engine, parsed.instance).readMessages(parsed.raw)
     const sessionId = prefixed(parsed.engine, parsed.raw, parsed.instance)
     const link = linkOf(store.get('links'), sessionId)
-    const messages = link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages))
-    const first = link?.segments?.[0]?.thread
-    return json({ catchup: readableCatchup(renderCatchup(first === undefined ? parsed.engine : parseId(first)?.engine ?? parsed.engine, messages, page.recentTurns !== undefined)) })
+    return { messages: link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages)), partial: page.recentTurns !== undefined }
+  }
+  route(SEEN_PATH, async (request) => {
+    const body = await request.json() as { id: string }
+    store.set('seen', { ...store.get('seen'), [body.id]: Date.now() })
+    return json({ ok: true })
+  }, 'seen', 'POST')
+  const branchReader = new BranchStatusReader(async (command, args, cwd) => (await promisify(execFile)(command === 'gh' ? resolveCommand('gh') : 'git', [...args], { cwd, timeout: 20_000, maxBuffer: 5_000_000 })).stdout)
+  route(BRANCH_STATUS_PATH, async (request) => {
+    const { targets } = await request.json() as { targets: readonly BranchTargetWire[] }
+    const states: Record<string, BranchStateWire> = {}
+    // Each row can start several git processes, so only a few rows run at one time.
+    for (let start = 0; start < targets.length; start += 6) {
+      await Promise.all(targets.slice(start, start + 6).map(async (target) => { states[target.key] = await branchReader.read(target.cwd, target.branch) }))
+    }
+    return json({ states })
+  }, 'branch status', 'POST')
+  route(DSH_IMPORT_PATH, async (request) => {
+    const body = await request.json() as DshImportBodyWire
+    const parsed = parseId(body.id)
+    if (parsed === undefined) return json({ error: 'unknown session' }, 404)
+    const host = { agents: ctx.get('agents' as never), agentPresets: ctx.get('agentPresets' as never), workspaceRegistry: ctx.get('workspaceRegistry' as never) } as unknown as DshHostServices
+    if ((host as Partial<DshHostServices>).agents === undefined) return json({ error: 'this DSH build has no agent service' }, 501)
+    const { messages } = await conversationMessages(parsed)
+    const selection = { provider: body.provider, model: body.model, ...body.effort === undefined || body.effort === '' ? {} : { reasoningEffort: body.effort } }
+    const seed = importEvents(withoutCatchup(messages), selection, Date.now())
+    if (seed.length === 0) return json({ error: 'this conversation has no text to import' }, 422)
+    const presets = host.agentPresets
+    const preset = presets === undefined ? undefined : await presets.resolve(undefined)
+    const { agent } = await host.agents.create({
+      sessionId: `session-${randomUUID()}`,
+      seed,
+      meta: { cwd: body.cwd, ...preset === undefined ? {} : { agentPreset: preset.id } },
+      agentOptions: selection,
+      ...presets === undefined || preset === undefined ? {} : { setup: async (agentCtx: Context) => { await presets.mount(agentCtx, preset.id) } },
+    })
+    await host.workspaceRegistry?.list().find(workspace => workspace.path === body.cwd)?.attachSession(agent.id).catch((error: unknown) => { console.warn('agent-bridge: imported session is not in a workspace', error) })
+    return json({ sessionId: agent.id })
+  }, 'dsh import', 'POST')
+  route(CATCHUP_PATH, async (request) => {
+    const parsed = idOf(request)
+    if (parsed === undefined) return json({ error: 'unknown session' }, 404)
+    const { messages, partial } = await conversationMessages(parsed)
+    const first = linkOf(store.get('links'), prefixed(parsed.engine, parsed.raw, parsed.instance))?.segments?.[0]?.thread
+    return json({ catchup: readableCatchup(renderCatchup(first === undefined ? parsed.engine : parseId(first)?.engine ?? parsed.engine, messages, partial)) })
   }, 'catchup')
   route(SESSION_PATH, async (request) => {
     const parsed = idOf(request)
@@ -628,6 +682,7 @@ export function apply(ctx: Context, config: Config): void {
         await driver.delete(parsed.raw)
         store.set('links', removeThread(store.get('links'), body.id))
         store.set('unlistedForks', store.get('unlistedForks').filter(fork => fork.id !== body.id))
+        store.set('seen', Object.fromEntries(Object.entries(store.get('seen')).filter(([id]) => id !== body.id)))
         return json({ ok: true })
     }
   }, 'manage', 'POST')

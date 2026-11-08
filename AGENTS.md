@@ -48,8 +48,22 @@ The end-to-end tests are `tests/e2e*.mjs`. They need a running `dsh web` instanc
 - `lib/` is committed, and an install from GitHub does no build. Rebuild `lib/` before you commit source changes.
 - If a change adds UI text, add the text to both the `zh` and `en` dictionaries in `src/client/locales.ts`.
 - If a change is visible to users, update both `README.md` and `README.zh.md`.
+- Bump `version` in `package.json` in each pull request to `main`. Use a minor bump for a new feature and a patch bump for a fix.
+- For each version, add an entry at the top of **What's new** in both README files. Explain what changed for the user.
+- If a version adds a feature, add an image to `docs/images/` and show it in that entry. Name the image `whats-new-<version>.png`.
 - If a change adds a setting, add it to the **Configuration** section of both README files.
 - Keep the `LICENSE` file. The MIT license requires this notice in all copies.
+
+## Sensitive data
+
+Do not put sensitive data in this repository. This rule applies to source, `lib/`, tests, docs, images, commit messages and pull request text.
+
+- Do not add credentials, API keys, tokens, cookies, `.env` files or SSH keys.
+- Do not add personal data, such as email addresses, or local folder paths, such as your home folder.
+- Do not add private code or data from an employer or a customer. Do not add internal hostnames, internal model routes or project names.
+- Do not add session transcripts or screenshots of real sessions. Make images with invented data.
+- `pnpm run build` removes the local folder from `lib/`. Do not edit the build to keep it.
+- Before you commit, read the staged diff, and search it for your home folder path and for key patterns.
 
 ## Main entry points
 
@@ -61,3 +75,5 @@ The end-to-end tests are `tests/e2e*.mjs`. They need a running `dsh web` instanc
 | `src/client/ExternalPanel.tsx` | Session panel in the main column |
 | `src/client/locales.ts` | UI text in `zh` and `en` |
 | `tests/` | Unit tests, end-to-end tests and stand-in executables |
+| `docs/images/` | Images for the README files, with invented data only |
+| `scripts/strip-local-paths.mjs` | Removes the local folder from the built bundles |

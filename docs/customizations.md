@@ -29,13 +29,29 @@ Copy this template to the top of the **Log** section.
 
 Put the newest entry first.
 
+### 2026-11-09: Version 0.3.0 and repository rules
+
+- **What:** The version is 0.3.0. Both README files have a **What's new** section with an image. `AGENTS.md` now requires a version bump, a **What's new** entry and an image for a new feature, and it forbids sensitive data. The build removes the local folder from `lib/`.
+- **Why:** Each version must explain what is new, and the repository must not hold private data.
+- **Files:** `package.json`, `README.md`, `README.zh.md`, `AGENTS.md`, `docs/images/whats-new-0.3.0.png`, `scripts/strip-local-paths.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** The build ran, and `lib/` has no local folder path. The image was checked for invented data only.
+
+### 2026-11-09: Unread and branch indicators on session rows
+
+- **What:** Claude and Codex rows show a blue dot when the session changed after you last opened it. Opening the row clears the dot. Rows show a purple icon when the branch of the session has a merged pull request, a green icon when it has an open pull request, and a gray icon when the branch has commits that the default branch does not have. Claude and Codex rows use the branch that the session recorded. DSH rows use the current branch of their folder and keep the DSH unread state. The list refreshes every 30 seconds while the app is visible.
+- **Why:** The rows must show the same information as Claude and Codex. A pull request decides first because a squash merge leaves no shared commit. The public Codex repository has only the unread logic of its terminal picker and a merge-base helper, and T3 Code has the pull request states.
+- **Files:** `src/branch-status.ts`, `src/index.ts`, `src/claude.ts`, `src/codex.ts`, `src/extras.ts`, `src/protocol.ts`, `src/client/RowIndicators.tsx`, `src/client/RowIndicators.module.css`, `src/client/index.ts`, `src/client/sessions.ts`, `src/client/locales.ts`, `tests/branch-status.test.mjs`.
+- **Upstream merge risk:** Low. The indicators use the DSH `sidebar.session.row.trailing` slot, so `dsh-better-left-sidebar` needs no change.
+- **Verified:** `branch-status` unit tests pass. The reader returned `merged`, `open`, `unmerged` and `none` for real branches and pull requests. In the DSH desktop app, a real row showed the unread dot. The branch icons were not seen in the app, because no listed session has a non-default branch that still exists.
+
 ### 2026-11-09: DeepSeek in the selector of an open chat
 
-- **What:** The selector of an open Claude or Codex chat has the DeepSeek Harness rail, and its models show in Favorites. If you select a DeepSeek model, the next message starts a new DSH session in the same folder with that model. The first message has the user and assistant text of the conversation as readable context. The old chat stays in the list. The switch goes one way, and tool calls, tool results and attachments do not move. Each catch-up line now names the provider that wrote the reply.
-- **Why:** The user wants to continue a Claude or Codex chat on a DeepSeek model. DSH has no public API to import history, so the context goes in the first message.
-- **Files:** `src/index.ts`, `src/links.ts`, `src/protocol.ts`, `src/client/index.ts`, `src/client/ExternalPanel.tsx`, `src/client/transcript.ts`, `src/client/locales.ts`, `tests/fork.test.mjs`.
-- **Upstream merge risk:** Low. The switch uses the DSH client calls `sessions.create`, `remote.session.selectModel`, `remote.session.prompt` and `uiWorkspace.openSession`, which are pre-stable.
-- **Verified:** `fork` and `links` unit tests pass. In the DSH desktop app, a switched Codex and Claude chat moved to `gpt-6.1-sol`, and the model answered from the copied context. A failed call restored the typed message and showed the error.
+- **What:** The selector of an open Claude or Codex chat has the DeepSeek Harness rail, and its models show in Favorites. If you select a DeepSeek model, the next message starts a new DSH session in the same folder with that model. The host creates the session with `agents.create` and a seed of the conversation (`src/dsh-import.ts`), so the old messages show as native messages and the model receives them as history. The newest 400,000 characters are kept. If DSH refuses the seed, the first message carries the text instead. The old chat stays in the list. The switch goes one way, and tool calls, tool results, thinking and attachments do not move. Each catch-up line now names the provider that wrote the reply.
+- **Why:** The user wants to continue a Claude or Codex chat on a DeepSeek model and see the old messages.
+- **Files:** `src/dsh-import.ts`, `tests/dsh-import.test.mjs`, `src/index.ts`, `src/links.ts`, `src/protocol.ts`, `src/client/index.ts`, `src/client/ExternalPanel.tsx`, `src/client/transcript.ts`, `src/client/locales.ts`, `tests/fork.test.mjs`.
+- **Upstream merge risk:** Medium. The seed follows the session format v4 event rules, which are pre-stable. A DSH update can make the seed invalid, and then the text fallback runs. An imported session also has no model-switch notice until the next app start.
+- **Verified:** `dsh-import`, `fork` and `links` unit tests pass. In the DSH desktop app, a switched Codex and Claude chat moved to a DeepSeek Harness model, showed its old messages as native messages and answered from them. The session reopened after an app restart. A failed call restored the typed message and showed the error.
 
 ### 2026-11-09: Fork from the session row
 

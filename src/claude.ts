@@ -80,6 +80,7 @@ export async function listClaudeRows(limit: number, home?: string): Promise<Sess
     title: info.customTitle ?? info.summary ?? info.firstPrompt ?? info.sessionId,
     cwd: info.cwd ?? '',
     updatedAt: info.lastModified,
+    ...info.gitBranch === undefined ? {} : { branch: info.gitBranch },
   }))
 }
 

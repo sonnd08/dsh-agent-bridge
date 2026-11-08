@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-bridge",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Use Claude Code, Codex and, optionally, Pi sessions inside DeepSeek Harness: list, open, continue, pin, rename and archive them in the DSH Workspace browser.",
   "keywords": [
     "deepseek-harness",
@@ -63,7 +63,7 @@
     "react": "^18.2.0"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && node scripts/strip-local-paths.mjs",
     "typecheck": "tsc -p tsconfig.host.json && tsc -p tsconfig.client.json"
   },
   "devDependencies": {
