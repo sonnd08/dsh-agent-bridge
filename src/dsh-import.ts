@@ -22,7 +22,8 @@ export interface SeedEvent {
   readonly surfaceOp?: 'append'
 }
 
-interface ImportTurn {
+/** One message that the user wrote and the reply text after it. */
+export interface ImportTurn {
   readonly user: string
   assistant: string
 }
@@ -33,17 +34,20 @@ const IMPORT_CHARACTERS = 400_000
 /** System message of the imported history, until DSH writes its own system prompt. */
 const IMPORT_SYSTEM_TEXT = 'This conversation started with another coding agent. The earlier messages are its history.'
 
-/** @param message - one message. @returns its text blocks; tool calls, tool results and thinking are left out. */
+/** Text that Claude Code adds to a user message, which the user did not write. */
+const HARNESS_NOTE = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+
+/** @param message - one message. @returns its text blocks; tool calls, tool results, thinking and harness notes are left out. */
 function textOf(message: MessageWire): string {
-  return message.blocks.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
+  return message.blocks.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').replace(HARNESS_NOTE, '').trim()
 }
 
 /**
  * Group a transcript by the messages the user wrote.
  * @param messages - transcript, oldest first.
- * @returns the newest turns that fit the size limit, oldest first.
+ * @returns all turns, oldest first.
  */
-export function importTurns(messages: readonly MessageWire[]): ImportTurn[] {
+export function allTurns(messages: readonly MessageWire[]): ImportTurn[] {
   const turns: ImportTurn[] = []
   for (const message of messages) {
     const text = textOf(message)
@@ -55,6 +59,15 @@ export function importTurns(messages: readonly MessageWire[]): ImportTurn[] {
     const current = turns.at(-1)
     if (current !== undefined) current.assistant = current.assistant === '' ? text : `${current.assistant}\n\n${text}`
   }
+  return turns
+}
+
+/**
+ * @param messages - transcript, oldest first.
+ * @returns the newest turns that fit the size limit, oldest first.
+ */
+export function importTurns(messages: readonly MessageWire[]): ImportTurn[] {
+  const turns = allTurns(messages)
   let used = 0
   let first = turns.length
   while (first > 0) {

@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { execFile } from 'node:child_process'
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -19,7 +19,8 @@ import {
 } from './claude.ts'
 import { CodexEngine } from './codex.ts'
 import { listPiRows, PiEngine, findPiFile, readPiMessages, readPiUsage, searchPi } from './pi.ts'
-import { probeInfo, probeTools, RunManager, SCREEN_SERVER, type TurnOptions } from './run.ts'
+import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
+import { baseOptions, probeInfo, probeTools, RunManager, SCREEN_SERVER, type TurnOptions } from './run.ts'
 import { readTasks, tasksAction } from './taskmaster.ts'
 import { voiceAction } from './voice.ts'
 import { watchStream } from './watch.ts'
@@ -30,17 +31,31 @@ import { startHeapWatch } from './diagnostics.ts'
 import { createSingleFlight } from './single-flight.ts'
 import { parseModelPrefs } from './model-prefs.ts'
 import { completedPrefix, forkedLink, mergeUnlistedForks } from './fork.ts'
-import { importEvents, type SeedEvent } from './dsh-import.ts'
+import { allTurns, importEvents, type SeedEvent } from './dsh-import.ts'
 import { BranchStatusReader } from './branch-status.ts'
+import { handoffFileName, handoffNote, renderHandoff } from './handoff.ts'
+import { claudeDriver, createEngineHost, ENGINE_TOOL, type EngineModel, type ProxyExecution } from './native-engine.ts'
+import { codexDriver } from './native-codex.ts'
+import { routeOf } from './native-routes.ts'
+import { lastUsedModel } from './used-model.ts'
+import { isQuiet, nextReplay } from './mirror.ts'
+import { choiceFromUsed } from './client/model-names.ts'
+import { engineCatalog, visibleRows } from './client/model-names.ts'
+
+/** Chats read for import in each engine; the session list limit applies if it is higher. */
+const MIRROR_LIST_LIMIT = 300
+/** Most chats imported by one call. */
+const MIRROR_IMPORTS_PER_SYNC = 5
+import { DEFAULT_EFFORT } from './model-prefs.ts'
 import { claudeExtraArgs, expandHome, parseInstance, splitLaunchArgs } from './instances.ts'
-import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, isCommand, linkOf, mergeLinkedMessages, planSwitch, readableCatchup, recordSwitch, removeThread, renderCatchup, withoutCatchup, type ThreadLink } from './links.ts'
-import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig } from './extras.ts'
+import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, stripCatchup, isCommand, linkOf, mergeLinkedMessages, planSwitch, readableCatchup, recordSwitch, removeThread, renderCatchup, withoutCatchup, type ThreadLink } from './links.ts'
+import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig, handoffDir } from './extras.ts'
 import {
   browseDirs, fsAction, gitClone, gitWorktreeAction, gitWorktrees, readImage,
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, MIRROR_PATH, type MirrorSyncWire, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -222,6 +237,7 @@ function turnOptions(settings: Settings, sessionId: string | undefined, text: st
     browserHeaded: settings.browserHeaded,
     peekabooCommand: settings.peekabooCommand,
     memory,
+    additionalDirectories: [handoffDir()],
   }
 }
 
@@ -256,7 +272,7 @@ function liveResponse(request: Request, driverOf: (engine: EngineName, instance?
  */
 /** Host services that create a DSH session with history; their types belong to the harness packages. */
 interface DshHostServices {
-  readonly agents: { create(options: { sessionId: string; seed: readonly SeedEvent[]; meta: { cwd: string; agentPreset?: string }; agentOptions: { provider: string; model: string; reasoningEffort?: string }; setup?: (agentCtx: Context) => Promise<void> }): Promise<{ readonly agent: { readonly id: string } }> }
+  readonly agents: { create(options: { sessionId: string; seed: readonly SeedEvent[]; meta: { cwd: string; agentPreset?: string }; agentOptions: { provider: string; model: string; reasoningEffort?: string }; setup?: (agentCtx: Context) => Promise<void> }): Promise<{ readonly agent: { readonly id: string }; dispose(): Promise<void> }> }
   readonly agentPresets?: { resolve(id: undefined): Promise<{ readonly id: string }>; mount(agentCtx: Context, id: string): Promise<void> }
   readonly workspaceRegistry?: { list(): readonly { readonly path: string; attachSession(id: string): Promise<void> }[] }
 }
@@ -284,7 +300,11 @@ export function apply(ctx: Context, config: Config): void {
     piEngine ??= new PiEngine(current().piExecutable)
     return piEngine
   }
+  let syncNativeRoutes = (): void => {}
+  let nativeHost: Pick<ReturnType<typeof createEngineHost>, 'armReplay' | 'isActive'> | undefined
   const store = new StateStore(process.env['AGENT_BRIDGE_STATE'] ?? defaultStatePath(), defaultStatePath('external-engines'))
+  // Claude Code needs the folder to exist before it can be allowed to read it.
+  void mkdir(handoffDir(), { recursive: true, mode: 0o700 }).catch((error: unknown) => { console.warn('agent-bridge: conversation folder failed', error) })
   const syncClaudeSerialization = (): void => { serializeClaudeSdk(store.get('instances').some(item => item.engine === 'claude')) }
   syncClaudeSerialization()
   const requireInstance = (id: string): ProviderInstanceWire => {
@@ -431,7 +451,13 @@ export function apply(ctx: Context, config: Config): void {
     const saved = store.get('unlistedForks')
     const { rows: all, unlisted } = mergeUnlistedForks([...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows, ...instanceRows], saved)
     if (unlisted.length !== saved.length) store.set('unlistedForks', unlisted)
-    const hidden = hiddenThreadIds(store.get('links'))
+    // A native chat is listed by DSH, so the engine thread behind it must not get a row too.
+    const hidden = new Set([...hiddenThreadIds(store.get('links')), ...Object.entries(store.get('engineThreads')).flatMap(([key, thread]) => {
+      const route = key.split('|')[1] ?? ''
+      const instance = store.get('instances').find(item => item.id === route)
+      const plain = [`${CLAUDE_ID_PREFIX}${thread}`, `${CODEX_ID_PREFIX}${thread}`]
+      return instance === undefined ? plain : plain.map(id => withInstanceId(id, instance.id))
+    })])
     const rows = all.filter(row => archived.has(row.id) === wantArchived && !hidden.has(row.id)).map(row => ({ ...row, title: cleanTitle(row.title) })).sort((a, b) => b.updatedAt - a.updatedAt)
     const running = rows.filter((row) => {
       const parsed = parseId(row.id)
@@ -511,27 +537,190 @@ export function apply(ctx: Context, config: Config): void {
     }
     return json({ states })
   }, 'branch status', 'POST')
+  // Claude Code as a DSH model provider: a chat stays one DSH session when the user changes model.
+  ctx.inject(['llm', 'tools', 'agents'] as never, (native: Context) => {
+    const services = native as unknown as {
+      readonly llm: { registerAdapter(providers: string[], adapter: unknown): () => void }
+      readonly tools: { register(tool: unknown): () => void }
+      readonly agents: { get(id: string): { readonly session: { readonly header: { readonly cwd?: string } } } | undefined }
+    }
+    const host = createEngineHost({
+      onRealTurn: (key) => {
+        const [sessionId, route] = key.split('|')
+        const mirrors = store.get('mirrors')
+        const found = Object.entries(mirrors).find(([, entry]) => entry.sessionId === sessionId && entry.route === route)
+        if (found !== undefined) store.set('mirrors', { ...mirrors, [found[0]]: { ...found[1], resync: true } })
+      },
+      cwdOf: sessionId => services.agents.get(sessionId)?.session.header.cwd ?? homedirOf(current()),
+      threadOf: key => store.get('engineThreads')[key],
+      saveThread: (key, thread) => { store.set('engineThreads', { ...store.get('engineThreads'), [key]: thread }) },
+      writeHandoff: async (sessionId, text) => {
+        await mkdir(handoffDir(), { recursive: true, mode: 0o700 })
+        const path = join(handoffDir(), handoffFileName(`native:${sessionId}`))
+        await writeFile(path, text, { mode: 0o600 })
+        return path
+      },
+    })
+    const modelsOf = async (engine: EngineName, provider: string, instance: string | undefined): Promise<readonly EngineModel[]> => {
+      const settings = current()
+      const info = await readInfo(settings, engine, instance, homedirOf(settings), false)
+      const prefs = store.get('modelPrefs')
+      return visibleRows(provider, engineCatalog(provider, info, prefs), prefs).map(row => ({
+        id: row.id, name: row.name, efforts: row.efforts,
+        ...row.efforts.some(level => level.id === DEFAULT_EFFORT) ? { defaultEffort: DEFAULT_EFFORT } : {},
+      }))
+    }
+    const driverFor = (engine: EngineName, provider: string, instance: string | undefined) => engine === 'codex'
+      ? codexDriver({ route: routeOf(provider), engine: () => codexFor(instance), listModels: () => modelsOf('codex', provider, instance), home: () => homedirOf(current()) })
+      : claudeDriver({
+        route: routeOf(provider),
+        query: claudeQuery,
+        options: ({ thread, cwd, text, model, effort }) => baseOptions(turnOptions(current(), thread, text, cwd, '', { model, ...effort === undefined ? {} : { effort }, ...claudeExtras(instance) })),
+        listModels: () => modelsOf('claude', provider, instance),
+      })
+    const registered = new Map<string, () => void>()
+    const syncRoutes = (): void => {
+      const wanted = new Map<string, { engine: EngineName; instance: string | undefined }>([['claude', { engine: 'claude', instance: undefined }], ['codex', { engine: 'codex', instance: undefined }]])
+      for (const item of store.get('instances')) wanted.set(item.id, { engine: item.engine, instance: item.id })
+      for (const [provider, dispose] of registered) {
+        if (!wanted.has(provider)) { dispose(); registered.delete(provider) }
+      }
+      for (const [provider, { engine, instance }] of wanted) {
+        if (registered.has(provider)) continue
+        const driver = driverFor(engine, provider, instance)
+        registered.set(provider, native.effect(() => services.llm.registerAdapter([driver.route], host.adapterFor(driver)), `agent-bridge: ${provider} provider`) as unknown as () => void)
+      }
+    }
+    syncRoutes()
+    syncNativeRoutes = syncRoutes
+    nativeHost = host
+    native.effect(() => () => { syncNativeRoutes = () => {}; nativeHost = undefined }, 'agent-bridge: provider routes')
+    native.effect(() => services.tools.register({
+      name: ENGINE_TOOL,
+      description: 'Internal record of a tool call that another coding engine already made. Never call this tool.',
+      parameters: { type: 'object', properties: { tool: { type: 'string' }, input: {} }, required: ['tool'] },
+      output: {
+        schema: { type: 'object', properties: { output: { type: 'string' }, is_error: { type: 'boolean' } }, required: ['output', 'is_error'] },
+        render: (_args: unknown, value: { output: string; is_error: boolean }) => [{ type: 'text', text: value.is_error ? `Error: ${value.output}` : value.output }],
+      },
+      execute: (args: unknown, exec: ProxyExecution) => host.executeProxy(args, exec),
+    }), 'agent-bridge: engine tool proxy')
+  })
+  const dshHost = (): DshHostServices | undefined => {
+    const host = { agents: ctx.get('agents' as never), agentPresets: ctx.get('agentPresets' as never), workspaceRegistry: ctx.get('workspaceRegistry' as never) } as unknown as DshHostServices
+    return (host as Partial<DshHostServices>).agents === undefined ? undefined : host
+  }
+  const createImported = async (seed: readonly SeedEvent[], selection: { provider: string; model: string; reasoningEffort?: string }, cwd: string): Promise<string> => {
+    const host = dshHost()
+    if (host === undefined) throw new HttpError(501, 'this DSH build has no agent service')
+    const presets = host.agentPresets
+    const preset = presets === undefined ? undefined : await presets.resolve(undefined)
+    const handle = await host.agents.create({
+      sessionId: `session-${randomUUID()}`,
+      seed,
+      meta: { cwd, ...preset === undefined ? {} : { agentPreset: preset.id } },
+      agentOptions: selection,
+      ...presets === undefined || preset === undefined ? {} : { setup: async (agentCtx: Context) => { await presets.mount(agentCtx, preset.id) } },
+    })
+    const sessionId = handle.agent.id
+    await host.workspaceRegistry?.list().find(workspace => workspace.path === cwd)?.attachSession(sessionId).catch((error: unknown) => { console.warn('agent-bridge: imported session is not in a workspace', error) })
+    // An agent lives as long as its creator, and this plugin can reload at any time. The stored session is loaded by the DSH session controller on the next call.
+    await handle.dispose()
+    return sessionId
+  }
+  let mirrorRun: Promise<MirrorSyncWire> | undefined
+  const mirrorChecked = new Map<string, number>()
+  /** Import up to a few chats and find one new turn of each imported chat. */
+  const syncMirrors = async (ready: Readonly<Record<string, string>>, settings: Settings): Promise<MirrorSyncWire> => {
+    const created: { sessionId: string; title: string }[] = []
+    const replays: { sessionId: string; user: string }[] = []
+    const now = Date.now()
+    if (store.get('mirrorSince') === 0) store.set('mirrorSince', now)
+    const since = store.get('mirrorSince')
+    const limit = Math.max(settings.sessionLimit, MIRROR_LIST_LIMIT)
+    const instanceRows = (await Promise.all(store.get('instances').map(async (item) => {
+      const listed = await (item.engine === 'codex' ? codexFor(item.id).listRows(limit) : listClaudeRows(limit, claudeHome(item.id))).catch(() => [])
+      return listed.map(row => ({ ...row, id: withInstanceId(row.id, item.id) }))
+    }))).flat()
+    const codexRows = settings.codexEnabled ? await codex().listRows(limit).catch(() => []) : []
+    const rows = [...await listClaudeRows(limit), ...codexRows, ...instanceRows].sort((a, b) => b.updatedAt - a.updatedAt)
+    const owned = new Set(Object.values(store.get('engineThreads')))
+    const hidden = new Set(hiddenThreadIds(store.get('links')))
+    let imports = 0
+    let more = false
+    for (const row of rows) {
+      const parsed = parseId(row.id)
+      if (parsed === undefined || parsed.engine === 'pi' || hidden.has(row.id)) continue
+      const driver = driverOf(parsed.engine, parsed.instance)
+      const quiet = isQuiet(row.updatedAt, now) && !driver.isRunning(parsed.raw)
+      const entry = store.get('mirrors')[row.id]
+      if (entry === undefined) {
+        if (!quiet) continue
+        // A file time can change with no new turn, so the time of the last turn decides.
+        if (row.updatedAt <= since || mirrorChecked.get(row.id) === row.updatedAt || owned.has(parsed.raw)) continue
+        if (row.cwd === '' || statSync(row.cwd, { throwIfNoEntry: false })?.isDirectory() !== true) continue
+        if (imports >= MIRROR_IMPORTS_PER_SYNC) { more = true; continue }
+        const file = await driver.findFile(parsed.raw)
+        const used = file === undefined ? undefined : await lastUsedModel(parsed.engine, file)
+        if (used?.at === undefined || used.at <= since) {
+          mirrorChecked.set(row.id, row.updatedAt)
+          continue
+        }
+        imports += 1
+        const provider = parsed.instance ?? parsed.engine
+        const route = routeOf(provider)
+        const info = await readInfo(settings, parsed.engine, parsed.instance, row.cwd, false).catch(() => undefined)
+        const choice = choiceFromUsed(used, info)
+        const selection = { provider: route, model: choice.model, ...choice.effort === '' ? {} : { reasoningEffort: choice.effort } }
+        const { messages } = await conversationMessages(parsed)
+        const clean = withoutCatchup(messages)
+        const seed = importEvents(clean, selection, now)
+        if (seed.length === 0) continue
+        const sessionId = await createImported(seed, selection, row.cwd)
+        store.set('engineThreads', { ...store.get('engineThreads'), [`${sessionId}|${route}`]: parsed.raw })
+        store.set('mirrors', { ...store.get('mirrors'), [row.id]: { sessionId, route, synced: allTurns(clean).length, checkedAt: row.updatedAt } })
+        created.push({ sessionId, title: cleanTitle(stripCatchup(row.title)) })
+        continue
+      }
+      if (row.updatedAt <= entry.checkedAt && entry.resync !== true) continue
+      const key = `${entry.sessionId}|${entry.route}`
+      if (nativeHost?.isActive(key) !== false || ready[entry.sessionId] !== entry.route) continue
+      if (entry.resync === true && !quiet) continue
+      const turns = allTurns(withoutCatchup((await conversationMessages(parsed)).messages))
+      if (entry.resync === true) {
+        store.set('mirrors', { ...store.get('mirrors'), [row.id]: { sessionId: entry.sessionId, route: entry.route, synced: turns.length, checkedAt: row.updatedAt } })
+        continue
+      }
+      // While the chat changes, its last turn can be unfinished. A turn with a later message after it is complete.
+      const complete = quiet ? turns : turns.slice(0, -1)
+      const replay = nextReplay(entry.synced, complete)
+      if (replay === undefined) {
+        if (quiet) store.set('mirrors', { ...store.get('mirrors'), [row.id]: { ...entry, synced: turns.length, checkedAt: row.updatedAt } })
+        continue
+      }
+      nativeHost.armReplay(key, { user: replay.user, assistant: replay.assistant })
+      // The time stays old while more turns wait, so that the next call finds them.
+      store.set('mirrors', { ...store.get('mirrors'), [row.id]: { ...entry, synced: replay.synced, ...quiet && replay.synced >= turns.length ? { checkedAt: row.updatedAt } : {} } })
+      replays.push({ sessionId: entry.sessionId, user: replay.user })
+      more = more || replay.synced < complete.length
+    }
+    return { created, replays, more }
+  }
+  route(MIRROR_PATH, async (request, settings) => {
+    const body = await request.json() as { ready?: Record<string, string> }
+    mirrorRun ??= syncMirrors(body.ready ?? {}, settings).finally(() => { mirrorRun = undefined })
+    return json(await mirrorRun)
+  }, 'mirror', 'POST')
   route(DSH_IMPORT_PATH, async (request) => {
     const body = await request.json() as DshImportBodyWire
     const parsed = parseId(body.id)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
-    const host = { agents: ctx.get('agents' as never), agentPresets: ctx.get('agentPresets' as never), workspaceRegistry: ctx.get('workspaceRegistry' as never) } as unknown as DshHostServices
-    if ((host as Partial<DshHostServices>).agents === undefined) return json({ error: 'this DSH build has no agent service' }, 501)
+    if (dshHost() === undefined) return json({ error: 'this DSH build has no agent service' }, 501)
     const { messages } = await conversationMessages(parsed)
     const selection = { provider: body.provider, model: body.model, ...body.effort === undefined || body.effort === '' ? {} : { reasoningEffort: body.effort } }
     const seed = importEvents(withoutCatchup(messages), selection, Date.now())
     if (seed.length === 0) return json({ error: 'this conversation has no text to import' }, 422)
-    const presets = host.agentPresets
-    const preset = presets === undefined ? undefined : await presets.resolve(undefined)
-    const { agent } = await host.agents.create({
-      sessionId: `session-${randomUUID()}`,
-      seed,
-      meta: { cwd: body.cwd, ...preset === undefined ? {} : { agentPreset: preset.id } },
-      agentOptions: selection,
-      ...presets === undefined || preset === undefined ? {} : { setup: async (agentCtx: Context) => { await presets.mount(agentCtx, preset.id) } },
-    })
-    await host.workspaceRegistry?.list().find(workspace => workspace.path === body.cwd)?.attachSession(agent.id).catch((error: unknown) => { console.warn('agent-bridge: imported session is not in a workspace', error) })
-    return json({ sessionId: agent.id })
+    return json({ sessionId: await createImported(seed, selection, body.cwd) })
   }, 'dsh import', 'POST')
   route(CATCHUP_PATH, async (request) => {
     const parsed = idOf(request)
@@ -548,10 +737,14 @@ export function apply(ctx: Context, config: Config): void {
       const goal = await driver.readGoal(parsed.raw)
       const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw, claudeHome(parsed.instance)) : parsed.engine === 'pi' ? await readPiUsage(parsed.raw) : undefined
       const page = await driver.readMessages(parsed.raw)
+      const used = await driver.findFile(parsed.raw).then(file => file === undefined ? undefined : lastUsedModel(parsed.engine, file)).catch((error: unknown) => {
+        console.warn('agent-bridge: last model of the session is unknown', error)
+        return undefined
+      })
       const sessionId = prefixed(parsed.engine, parsed.raw, parsed.instance)
       const link = linkOf(store.get('links'), sessionId)
       const messages = link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages))
-      return { messages: withoutCatchup(messages), ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
+      return { messages: withoutCatchup(messages), ...used === undefined ? {} : { used }, ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
     }))
   }, 'session')
   route(WATCH_PATH, (request, settings) => watchResponse(request, settings.watchIntervalMs, driverOf), 'watch')
@@ -609,6 +802,21 @@ export function apply(ctx: Context, config: Config): void {
   }
   // One switch per source thread at a time: a second one would create a second thread for the other provider.
   const switching = new Set<string>()
+  /** A provider reads the file itself; if the file cannot be written, the text goes in the message. */
+  const writeHandoff = async (source: EngineId, sourceId: string, plan: { readonly catchup: string; readonly unseen: number }): Promise<string> => {
+    try {
+      const { messages, partial } = await conversationMessages(source)
+      const first = linkOf(store.get('links'), sourceId)?.segments?.[0]?.thread
+      const handoff = renderHandoff(first === undefined ? source.engine : parseId(first)?.engine ?? source.engine, messages, partial)
+      await mkdir(handoffDir(), { recursive: true, mode: 0o700 })
+      const path = join(handoffDir(), handoffFileName(sourceId))
+      await writeFile(path, handoff.text, { mode: 0o600 })
+      return handoffNote(source.engine, path, handoff, plan.unseen)
+    } catch (error) {
+      console.warn('agent-bridge: conversation file failed, sending the text instead', error)
+      return plan.catchup
+    }
+  }
   const sendSwitched = async (body: SendBodyWire, sourceId: string, settings: Settings): Promise<{ id: string }> => {
     const source = parseId(sourceId)
     const target = body.engine
@@ -623,7 +831,8 @@ export function apply(ctx: Context, config: Config): void {
       } catch (error) {
         throw new HttpError(400, error instanceof Error ? error.message : String(error))
       }
-      const sent = await sendMessage({ ...body, ...plan.targetId === undefined ? {} : { id: plan.targetId }, text: composeSwitchPrompt(body.text, plan.catchup) }, settings)
+      const note = plan.unseen === 0 && !plan.gap ? '' : await writeHandoff(source, sourceId, plan)
+      const sent = await sendMessage({ ...body, ...plan.targetId === undefined ? {} : { id: plan.targetId }, text: composeSwitchPrompt(body.text, note) }, settings)
       // A slash command carries no catch-up, so the next message still has to.
       store.set('links', recordSwitch(store.get('links'), sourceId, sent.id, isCommand(body.text) ? undefined : plan.deliveredThrough, plan.deliveredThrough))
       return sent
@@ -681,6 +890,7 @@ export function apply(ctx: Context, config: Config): void {
       case 'delete':
         await driver.delete(parsed.raw)
         store.set('links', removeThread(store.get('links'), body.id))
+        await rm(join(handoffDir(), handoffFileName(body.id)), { force: true })
         store.set('unlistedForks', store.get('unlistedForks').filter(fork => fork.id !== body.id))
         store.set('seen', Object.fromEntries(Object.entries(store.get('seen')).filter(([id]) => id !== body.id)))
         return json({ ok: true })
@@ -756,13 +966,9 @@ export function apply(ctx: Context, config: Config): void {
   route(GIT_ACTION_PATH, async request => json(await gitAction(await request.json() as GitActionWire)), 'git action', 'POST')
   const infoCache = new Map<string, { at: number; info: InfoWire }>()
   const infoLoads = new Map<string, Promise<InfoWire>>()
-  route(INFO_PATH, async (request, settings) => {
-    const wanted = query(request, 'engine')
-    const engine: EngineName = wanted === 'codex' || wanted === 'pi' ? wanted : 'claude'
-    const asked = query(request, 'cwd') || homedirOf(settings)
+  const readInfo = async (settings: Settings, engine: EngineName, instance: string | undefined, asked: string, fresh: boolean): Promise<InfoWire> => {
     // A project folder that was deleted or moved must not break the lists: fall back to the home directory.
     const cwd = statSync(asked, { throwIfNoEntry: false })?.isDirectory() === true ? asked : homedir()
-    const instance = query(request, 'instance') || undefined
     const key = `${engine}:${instance ?? ''}:${cwd}`
     // Only the newest load of a key writes the cache; a forced load or an MCP change supersedes the running one.
     const load = (force: boolean): Promise<InfoWire> => {
@@ -781,11 +987,16 @@ export function apply(ctx: Context, config: Config): void {
       return started
     }
     const cached = infoCache.get(key)
-    const fresh = query(request, 'fresh') === '1'
-    if (cached === undefined || fresh) return json(await load(fresh))
+    if (cached === undefined || fresh) return await load(fresh)
     // Asking the engine takes seconds (Claude starts a process), so an old answer is served while a newer one loads.
     if (Date.now() - cached.at >= 20_000) load(false).catch(() => { /* the old answer stays until a load succeeds */ })
-    return json(cached.info)
+    return cached.info
+  }
+  route(INFO_PATH, async (request, settings) => {
+    const wanted = query(request, 'engine')
+    const engine: EngineName = wanted === 'codex' || wanted === 'pi' ? wanted : 'claude'
+    const asked = query(request, 'cwd') || homedirOf(settings)
+    return json(await readInfo(settings, engine, query(request, 'instance') || undefined, asked, query(request, 'fresh') === '1'))
   }, 'info')
   route(ABOUT_PATH, async (_request, settings) => json(await readAbout(settings)), 'about')
   route(SEARCH_PATH, async (request, settings) => {
@@ -819,6 +1030,7 @@ export function apply(ctx: Context, config: Config): void {
     const body = await request.json() as InstanceBodyWire
     if (body.action === 'remove') {
       store.set('instances', store.get('instances').filter(item => item.id !== body.id))
+      syncNativeRoutes()
       instanceDrivers.delete(body.id)
       void codexEngines.get(body.id)?.closeAll()
       codexEngines.delete(body.id)
@@ -834,6 +1046,7 @@ export function apply(ctx: Context, config: Config): void {
       return json({ error: error instanceof Error ? error.message : String(error) }, 400)
     }
     store.set('instances', [...store.get('instances'), parsed.instance])
+    syncNativeRoutes()
     syncClaudeSerialization()
     return json({ instances: store.get('instances') })
   }, 'instances', 'BOTH')

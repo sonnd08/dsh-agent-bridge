@@ -3,6 +3,7 @@
  * MCP servers and skills of the Claude configuration, and the global git identity.
  * @module dsh-agent-bridge/extras
  */
+import type { MirrorEntry } from './mirror.ts'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -35,6 +36,12 @@ export interface PersistedState {
   instances: ProviderInstanceWire[]
   /** Forks that the engine does not list yet. */
   unlistedForks: SessionRowWire[]
+  /** Claude thread of each DSH session and provider that runs an engine. */
+  engineThreads: Record<string, string>
+  /** The DSH chat of each Claude Code and Codex chat, by external id. */
+  mirrors: Record<string, MirrorEntry>
+  /** Only a chat with a turn after this time is imported. Zero until the first import check sets it. */
+  mirrorSince: number
   /** When the user last opened each listed session, in milliseconds. */
   seen: Record<string, number>
 }
@@ -69,7 +76,7 @@ export function defaultStatePath(plugin: 'agent-bridge' | 'external-engines' = '
 export class StateStore {
   private state: PersistedState
   constructor(private readonly path: string, legacyPath?: string) {
-    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [], links: [], modelPrefs: NO_MODEL_PREFS, instances: [], unlistedForks: [], seen: {} }
+    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [], links: [], modelPrefs: NO_MODEL_PREFS, instances: [], unlistedForks: [], engineThreads: {}, mirrors: {}, mirrorSince: 0, seen: {} }
     const source = legacyPath !== undefined && !existsSync(path) ? legacyPath : path
     try {
       this.state = { ...this.state, ...JSON.parse(readFileSync(source, 'utf8')) as Partial<PersistedState> }
@@ -85,6 +92,11 @@ export class StateStore {
     writeFileSync(temporary, JSON.stringify(this.state), { mode: 0o600 })
     renameSync(temporary, this.path)
   }
+}
+
+/** @returns the folder of the conversation files that a provider reads after a switch. */
+export function handoffDir(): string {
+  return join(dirname(process.env['AGENT_BRIDGE_STATE'] ?? defaultStatePath()), 'handoffs')
 }
 
 /** The Claude executable and the environment the CLI needs (the login lookup wants USER). */

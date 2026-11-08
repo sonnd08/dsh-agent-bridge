@@ -41,13 +41,16 @@ interface RpcMessage {
   readonly error?: { readonly message?: string }
 }
 
-type Json = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any -- app-server payloads are read field by field at the wire boundary
+export type Json = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any -- app-server payloads are read field by field at the wire boundary
 
 /** How an added instance starts its app-server. */
 export interface CodexLaunch {
   readonly env?: Readonly<Record<string, string>>
   readonly args?: readonly string[]
 }
+
+/** A raw event of one thread. `approval` is a request that waits for {@link CodexEngine.answer}. */
+export type CodexThreadEvent = { readonly method: string; readonly params: Json }
 
 class CodexRpc {
   private child: ChildProcess | undefined
@@ -148,6 +151,27 @@ class CodexRpc {
   }
 }
 
+const CLOSING_RETRY_MS = 250
+const CLOSING_RETRIES = 40
+
+/**
+ * Repeat a resume while the app-server closes the thread: the close starts when the bridge releases a finished thread.
+ * @param resume - sends the resume.
+ * @param waitMs - pause between two attempts.
+ * @param retries - most repeats.
+ * @returns the resume result.
+ */
+export async function retryWhileClosing<T>(resume: () => Promise<T>, waitMs = CLOSING_RETRY_MS, retries = CLOSING_RETRIES): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await resume()
+    } catch (error) {
+      if (attempt >= retries || !(error instanceof Error) || !error.message.includes('is closing')) throw error
+      await new Promise(resolve => setTimeout(resolve, waitMs))
+    }
+  }
+}
+
 interface Run {
   turnId?: string
   readonly pending: Map<string, (decision: CodexDecision) => void>
@@ -235,6 +259,7 @@ export class CodexEngine {
   private readonly runs = new Map<string, Run>()
   private readonly loaded = new Set<string>()
   private readonly items = new Map<string, Json>()
+  private readonly watchers = new Map<string, (event: CodexThreadEvent) => void>()
 
   /**
    * @param executable - path of the `codex` executable.
@@ -357,14 +382,7 @@ export class CodexEngine {
   async start(options: CodexTurnOptions): Promise<string> {
     if (options.threadId !== undefined && this.runs.has(options.threadId)) throw new Error('a turn is already running in this session')
     const settings = { approvalPolicy: options.approvalPolicy, sandbox: options.sandbox }
-    let threadId = options.threadId
-    if (threadId === undefined) {
-      threadId = String((await this.rpc.call('thread/start', { cwd: options.cwd, ...settings }))['thread']['id'])
-      this.loaded.add(threadId)
-    } else if (!this.loaded.has(threadId)) {
-      await this.rpc.call('thread/resume', { threadId, ...settings })
-      this.loaded.add(threadId)
-    }
+    const threadId = await this.prepareThread(options)
     const goal = /^\/goal\s+([\s\S]+)$/.exec(options.text.trim())
     if (goal !== null) {
       const condition = (goal[1] ?? '').trim()
@@ -390,6 +408,58 @@ export class CodexEngine {
     })
     this.ensureRun(threadId).turnId = String(response['turn']['id'])
     return threadId
+  }
+
+  /**
+   * Create or load a thread, so that a caller can watch it before the turn starts.
+   * @param options - the thread id, folder, permissions and model.
+   * @returns the thread id.
+   */
+  async prepareThread(options: Pick<CodexTurnOptions, 'threadId' | 'cwd' | 'approvalPolicy' | 'sandbox' | 'model'>): Promise<string> {
+    // A resumed thread keeps the model of its last turn unless the resume names another one.
+    const settings = { approvalPolicy: options.approvalPolicy, sandbox: options.sandbox, ...options.model === undefined || options.model === '' ? {} : { model: options.model } }
+    if (options.threadId === undefined) {
+      const created = String((await this.rpc.call('thread/start', { cwd: options.cwd, ...settings }))['thread']['id'])
+      this.loaded.add(created)
+      return created
+    }
+    if (!this.loaded.has(options.threadId)) {
+      const threadId = options.threadId
+      await retryWhileClosing(() => this.rpc.call('thread/resume', { threadId, ...settings }))
+      this.loaded.add(threadId)
+    }
+    return options.threadId
+  }
+
+  /**
+   * Receive the raw events of a thread.
+   * @param threadId - thread id (no prefix).
+   * @param listener - called with each notification, and with `approval` for each request that waits for an answer.
+   * @returns the function that ends the watch.
+   */
+  watch(threadId: string, listener: (event: CodexThreadEvent) => void): () => void {
+    this.watchers.set(threadId, listener)
+    return () => { if (this.watchers.get(threadId) === listener) this.watchers.delete(threadId) }
+  }
+
+  /**
+   * Get one reply from a thread that the user does not see.
+   * @param cwd - working folder.
+   * @param prompt - the text.
+   * @param model - the model.
+   * @returns the last agent message.
+   */
+  async ask(cwd: string, prompt: string, model: string): Promise<string> {
+    const threadId = String((await this.rpc.call('thread/start', { cwd, approvalPolicy: 'never', sandbox: 'read-only', ephemeral: true }))['thread']['id'])
+    this.loaded.add(threadId)
+    return await new Promise<string>((resolve, reject) => {
+      let text = ''
+      const stop = this.watch(threadId, ({ method, params }) => {
+        if (method === 'item/completed' && params['item']['type'] === 'agentMessage') text = String(params['item']['text'] ?? '')
+        if (method === 'turn/completed') { stop(); resolve(text) }
+      })
+      this.rpc.call('turn/start', { threadId, input: [{ type: 'text', text: prompt, text_elements: [] }], model }).catch((error: unknown) => { stop(); reject(error as Error) })
+    })
   }
 
   private finishWithoutTurn(threadId: string): void {
@@ -424,6 +494,7 @@ export class CodexEngine {
       return
     }
     if (threadId === undefined) return
+    if (message.method !== undefined) this.watchers.get(threadId)?.({ method: message.method, params })
     switch (message.method) {
       case 'turn/started':
         this.ensureRun(threadId).turnId = String(params['turn']['id'])
@@ -508,6 +579,7 @@ export class CodexEngine {
       this.rpc.respond(id, reply(decision))
     })
     this.hub.emit(threadId, { kind: 'permission', permission })
+    this.watchers.get(threadId)?.({ method: 'approval', params: { requestId, request: method, itemId: params['itemId'] } })
   }
 
   /**

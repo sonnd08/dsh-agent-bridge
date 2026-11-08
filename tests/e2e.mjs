@@ -234,6 +234,7 @@ await step('gate 2b: replies are rendered as Markdown, not raw text', async () =
 })
 
 await step('gate 2c: tool calls are folded cards; opening one shows the terminal output or the diff', async () => {
+  await page.locator('[data-testid="ext-tool-run"]').first().click()
   const cards = page.locator('[data-testid="ext-tool-use"]')
   assert(await cards.count() === 2, 'two tool cards')
   assert(await cards.nth(0).getAttribute('data-tool') === 'Bash' && await cards.nth(1).getAttribute('data-tool') === 'Edit', 'tool names')

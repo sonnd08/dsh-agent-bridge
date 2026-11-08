@@ -4,6 +4,7 @@ import { DiffBlock, DisclosureRow, MarkdownText, StateDot, TerminalBlock, type D
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { TodoWire } from '../protocol.ts'
 import type { TimelineItem } from './timeline.ts'
+import { activeLine, argOf as arg, runTitle, toolLine, type ToolRun } from './tool-runs.ts'
 import css from './ToolCard.module.css'
 
 /** Translator the panel passes down. */
@@ -13,27 +14,6 @@ type ToolItem = Extract<TimelineItem, { kind: 'tool' }>
 
 const COMMAND_TOOLS = new Set(['Bash', 'command'])
 const LINE_CAP = 40
-
-/** Pull a string argument. */
-function arg(args: Readonly<Record<string, unknown>> | undefined, key: string): string | undefined {
-  const value = args?.[key]
-  return typeof value === 'string' && value !== '' ? value : undefined
-}
-
-/**
- * One-line description of a tool call.
- * @param name - tool name.
- * @param args - structured input, when the engine supplied it.
- * @param fallback - text summary of the input.
- * @returns the text shown beside the tool name.
- */
-export function summarizeTool(name: string, args: Readonly<Record<string, unknown>> | undefined, fallback: string): string {
-  const pick = COMMAND_TOOLS.has(name)
-    ? arg(args, 'description') ?? arg(args, 'command')
-    : arg(args, 'file_path') ?? arg(args, 'path') ?? arg(args, 'pattern') ?? arg(args, 'url') ?? arg(args, 'query')
-      ?? arg(args, 'description') ?? arg(args, 'prompt') ?? arg(args, 'command')
-  return (pick ?? fallback).split('\n')[0] ?? ''
-}
 
 /** Edits of one Edit, MultiEdit, or Write call as diff hunks. */
 function hunksOf(name: string, args: Readonly<Record<string, unknown>> | undefined): DiffHunk[] | undefined {
@@ -168,11 +148,10 @@ export function ToolCard({ item, t, running }: { item: ToolItem; t: Translate; r
   const { use, result } = item
   const state: StateDotState = result?.isError === true ? 'error' : result !== undefined ? 'done' : running ? 'ongoing' : 'idle'
   const name = use?.name ?? t('panel.toolResult')
-  const summary = use === undefined ? (result?.text ?? '').split('\n')[0] ?? '' : summarizeTool(use.name, use.args, use.input)
   return (
     <div className={css.tool} data-testid="ext-tool-use" data-tool={name} data-state={state}>
       <DisclosureRow
-        icon={<StateDot state={state} />} title={`${name}  ${summary}`} open={open} expandable
+        icon={<StateDot state={state} />} title={use === undefined ? `${name}  ${toolLine(item)}` : toolLine(item)} open={open} expandable
         onToggle={() => { setOpen(!open) }} expandOnRowClick titleClassName={css.toolTitle}
       >
         <div className={css.toolBody}><ToolBody item={item} t={t} /></div>
@@ -185,6 +164,33 @@ export function ToolCard({ item, t, running }: { item: ToolItem; t: Translate; r
           <img src={zoom} alt={t('panel.image')} />
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * The work between two pieces of text, folded into one row.
+ * @param props - the run, translator, whether the turn is running, and whether this run is the newest work of that turn.
+ * @returns the row, which opens to the calls.
+ */
+export function ToolRunRow({ run, t, running, active }: { run: ToolRun; t: Translate; running: boolean; active: boolean }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={css.tool} data-testid="ext-tool-run">
+      <DisclosureRow
+        icon={<StateDot state={active ? 'ongoing' : 'idle'} />} title={active ? activeLine(run.items) : runTitle(run.items, t)} running={active} open={open} expandable
+        onToggle={() => { setOpen(!open) }} expandOnRowClick titleClassName={css.toolTitle}
+      >
+        <div className={css.runBody}>
+          {run.items.map((item, index) => {
+            switch (item.kind) {
+              case 'thinking': return <Thinking key={index} text={item.text} t={t} />
+              case 'todos': return <Todos key={index} todos={item.todos} />
+              case 'tool': return <ToolCard key={index} item={item} t={t} running={running} />
+            }
+          })}
+        </div>
+      </DisclosureRow>
     </div>
   )
 }

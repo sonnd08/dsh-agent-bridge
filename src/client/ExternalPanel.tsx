@@ -2,9 +2,9 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button, Menu, MenuItemButton, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, PropsHooks, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { draftIdFor, DRAFT_PATH, engineOfSession, providerEngine, providerInstance, providerOfSession, type AttachmentWire, type EngineName, type PermissionPreset, type PermissionWire } from '../protocol.ts'
+import { draftIdFor, DRAFT_PATH, engineOfSession, providerEngine, providerInstance, providerOfSession, type AttachmentWire, type ChoiceWire, type EngineName, type PermissionPreset, type PermissionWire } from '../protocol.ts'
 import { engineGroup } from './NewChat.tsx'
-import { engineLabels, fastTierOf, speedFor } from './model-names.ts'
+import { choiceFromUsed, engineLabels, fastTierOf, speedFor } from './model-names.ts'
 import { bridgeAccessOptions, PermissionPicker, PermissionPopover } from './PermissionPicker.tsx'
 import { useModelPrefs } from './model-prefs-store.ts'
 import { enginePrefs, isEngineEnabled, orderRows, pickEffort, toggleFavorite } from '../model-prefs.ts'
@@ -12,7 +12,8 @@ import { ProviderPicker, type PickerEngine } from './ProviderPicker.tsx'
 import { isDraft, type TranscriptController, type TranscriptState } from './transcript.ts'
 import type { SessionsSnapshot } from './sessions.ts'
 import { IconAlarm, IconArchive, IconBranch, IconCopy, IconEdit, IconMore, IconSearch, IconTrash } from './icons.tsx'
-import { Markdown, Thinking, Todos, ToolCard } from './ToolCard.tsx'
+import { Markdown, Thinking, Todos, ToolCard, ToolRunRow } from './ToolCard.tsx'
+import { foldToolRuns } from './tool-runs.ts'
 import { buildTimeline } from './timeline.ts'
 import { AttachmentChips, ComposerBar, SlashMenu, toAttachments, useChoices } from './ComposerBar.tsx'
 import { useInfos } from './info.ts'
@@ -82,7 +83,7 @@ export type ExternalPanelProps =
 
 type T = ExternalPanelProps['t']
 
-const spokenText = (items: ReadonlyArray<{ kind: string; text?: string }>): string => items.flatMap(item => item.kind === 'text' && item.text !== undefined ? [item.text] : []).join('\n').trim()
+const spokenText = (items: ReadonlyArray<{ kind: string; text?: string | undefined }>): string => items.flatMap(item => item.kind === 'text' && item.text !== undefined ? [item.text] : []).join('\n').trim()
 
 /** How close to the bottom, in pixels, the reader must be for new content to keep the panel scrolled down. */
 const FOLLOW_SLACK = 48
@@ -172,7 +173,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
   useEffect(() => { if (isDraft(transcript.sessionId)) { const pending = takePendingCwd(); if (pending !== undefined) setCwd(pending) } }, [transcript.sessionId, takePendingCwd])
   useEffect(() => { setTab('chat'); setVisited(new Set()) }, [transcript.sessionId])
   const pick = (next: typeof tab): void => { setTab(next); setVisited(current => new Set(current).add(next)) }
-  const timeline = useMemo(() => buildTimeline(transcript.messages), [transcript.messages])
+  const timeline = useMemo(() => foldToolRuns(buildTimeline(transcript.messages)), [transcript.messages])
   // The panel keeps the latest message in view while the reader is at the bottom; scrolling up to read history stops that.
   const panelRef = useRef<HTMLElement>(null)
   const listRef = useRef<HTMLOListElement>(null)
@@ -207,7 +208,20 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
   const infos = useInfos(providerIds, pickerCwd)
   const info = infos[provider]?.info
   const choices = useChoices(providerIds)
-  const [choice, setChoice] = choices[provider] ?? [{ model: '', effort: '' }, () => {}]
+  const [savedChoice, saveChoice] = choices[provider] ?? [{ model: '', effort: '' }, () => {}]
+  // An open chat shows the model that it used last. A pick in that chat lasts until a turn uses it.
+  const [pickedInChat, setPickedInChat] = useState<{ readonly id: string; readonly choice: ChoiceWire } | undefined>(undefined)
+  const inOwnProvider = !draft && transcript.sessionId !== undefined && provider === sessionProvider
+  const usedChoice = inOwnProvider && transcript.used !== undefined ? choiceFromUsed(transcript.used, info) : undefined
+  const picked = pickedInChat !== undefined && pickedInChat.id === transcript.sessionId ? pickedInChat.choice : undefined
+  const choice: ChoiceWire = picked ?? (usedChoice === undefined ? savedChoice : { ...savedChoice, ...usedChoice })
+  const setChoice = (next: ChoiceWire): void => {
+    saveChoice({ ...savedChoice, ...Object.fromEntries(Object.entries(next).filter(([key, value]) => choice[key as keyof ChoiceWire] !== value)) })
+    if (inOwnProvider) setPickedInChat({ id: transcript.sessionId as string, choice: next })
+  }
+  useEffect(() => {
+    if (picked !== undefined && usedChoice !== undefined && picked.model === usedChoice.model && (picked.effort === usedChoice.effort || usedChoice.effort === '')) setPickedInChat(undefined)
+  }, [picked?.model, picked?.effort, usedChoice?.model, usedChoice?.effort])
   const dshCatalog = useDshCatalog()
   const dshRow = dshTarget === undefined ? undefined : dshCatalog.find(model => model.id === dshTarget.modelId)
   const pickProvider = (target: PickerEngine, modelId: string, explicit: string | undefined): void => {
@@ -229,6 +243,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
     if (picked.prefs !== modelPrefs) saveModelPrefs(picked.prefs)
     const speed = speedFor(targetInfo, modelId, current.speed)
     set({ ...current, model: modelId, effort: picked.effort, ...speed === undefined ? {} : { speed } })
+    if (!draft && target === sessionProvider) setPickedInChat({ id: transcript.sessionId as string, choice: { ...choice, model: modelId, effort: picked.effort, ...speed === undefined ? {} : { speed } } })
     if (!draft) setSwitchTarget(target === sessionProvider ? undefined : target)
     else if (target !== sessionProvider) openSession(draftIdFor(target))
   }
@@ -278,7 +293,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
     if (dshTarget !== undefined && transcript.sessionId !== undefined) {
       const fromId = transcript.sessionId
       setText('')
-      void startDshSession({ fromId, title: selected?.title ?? '', text: message, cwd: selected?.cwd ?? shownCwd, modelId: dshTarget.modelId, effort: dshTarget.effort }).then((failure) => {
+      void startDshSession({ fromId, title: selected?.title ?? '', text: message, cwd: selected?.cwd === undefined || selected.cwd === '' ? shownCwd : selected.cwd, modelId: dshTarget.modelId, effort: dshTarget.effort }).then((failure) => {
         if (failure === undefined) {
           void fetch(DRAFT_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: fromId, text: '' }) }).catch(() => {})
           return
@@ -292,7 +307,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
     following.current = true
     setText('')
     setAttachments([])
-    void controller.send(message, draft ? shownCwd : selected?.cwd ?? shownCwd, {
+    void controller.send(message, draft || selected?.cwd === undefined || selected.cwd === '' ? shownCwd : selected.cwd, {
       ...choice.model === '' ? {} : { model: choice.model }, ...pickerLabels.effortId === '' ? {} : { effort: pickerLabels.effortId },
       ...choice.permission === undefined || choice.permission === '' ? {} : { permission: choice.permission },
       ...sent.length === 0 ? {} : { attachments: sent },
@@ -419,6 +434,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
                 <div className={message.role === 'user' ? css.userBody : css.assistantBody}>
                   {message.items.map((item, index) => {
                     switch (item.kind) {
+                      case 'run': return <ToolRunRow key={item.id} run={item} t={t} running={transcript.running} active={transcript.running && message === timeline.at(-1) && index === message.items.length - 1} />
                       case 'text': return <div key={index} data-testid="ext-text"><Markdown text={item.text} t={t} /></div>
                       case 'thinking': return <Thinking key={index} text={item.text} t={t} />
                       case 'todos': return <Todos key={index} todos={item.todos} />

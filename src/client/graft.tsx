@@ -15,6 +15,7 @@
 import { Component, createElement, useMemo, useSyncExternalStore, type ComponentType, type ReactNode } from 'react'
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import { isDraft } from './transcript.ts'
+import { markOfRoute } from '../native-routes.ts'
 
 /** Prefix of external row ids in the browser; Host SessionIds never carry it. */
 export const EXTERNAL_PREFIX = 'ext:'
@@ -418,13 +419,49 @@ export function graftWorkspaceBrowser(slots: GraftSlots, source: GraftSource): (
   }
 }
 
+/** The session list fields that the row mark reads. */
+export interface RowMarkSessions {
+  getSnapshot(): { readonly byId: Readonly<Record<string, { readonly projectionValues?: { readonly modelSelection?: { readonly next: { readonly provider: string } | null } } } | undefined>> }
+  subscribe(listener: () => void): () => void
+}
+
+let rowMarkSessions: RowMarkSessions | undefined
+const rowMarkListeners = new Set<() => void>()
+const notifyRowMarks = (): void => { for (const listener of rowMarkListeners) listener() }
+
+function subscribeRowMarks(listener: () => void): () => void {
+  rowMarkListeners.add(listener)
+  return () => { rowMarkListeners.delete(listener) }
+}
+
 /**
- * Leading-cell mark of a session row: the engine that owns it.
+ * Give the row marks the harness session list.
+ * @param sessions - the session list.
+ * @returns the function that disconnects it.
+ */
+export function connectRowMarks(sessions: RowMarkSessions): () => void {
+  rowMarkSessions = sessions
+  const unsubscribe = sessions.subscribe(notifyRowMarks)
+  notifyRowMarks()
+  return () => {
+    unsubscribe()
+    rowMarkSessions = undefined
+    notifyRowMarks()
+  }
+}
+
+function rowMark(sessionId: string): string {
+  const engine = engineOf(sessionId)
+  return engine === 'dsh' ? markOfRoute(rowMarkSessions?.getSnapshot().byId[sessionId]?.projectionValues?.modelSelection?.next?.provider) : engine
+}
+
+/**
+ * Leading-cell mark of a session row: the engine that owns it, or for a harness chat the provider of its selected model.
  * @param props - the row's Session identity.
  * @param props.sessionId - browser row id.
  * @returns the mark span the engine-mark stylesheet draws.
  */
 export const EngineMark = Object.assign(
-  ({ sessionId }: { sessionId: string }): ReactNode => createElement('span', { 'data-engine': engineOf(sessionId), 'aria-hidden': true }),
+  ({ sessionId }: { sessionId: string }): ReactNode => createElement('span', { 'data-engine': useSyncExternalStore(subscribeRowMarks, () => rowMark(sessionId)), 'aria-hidden': true }),
   { [OWN_ROW_ENTRY]: true, displayName: 'ExternalEnginesMark' },
 )

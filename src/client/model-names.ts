@@ -1,6 +1,6 @@
 /** Display data of an external provider's models, for the provider selector. */
 import { DEFAULT_EFFORT, enginePrefs, orderRows } from '../model-prefs.ts'
-import { providerEngine, type ChoiceWire, type EngineName, type InfoWire, type ModelPrefsWire, type ModelWire, type PrefsEngine } from '../protocol.ts'
+import { providerEngine, type ChoiceWire, type EngineName, type InfoWire, type ModelPrefsWire, type ModelWire, type PrefsEngine, type UsedModelWire } from '../protocol.ts'
 
 /** Value of the Claude list entry that only means "use the engine's default". */
 const DEFAULT_VALUE = 'default'
@@ -83,6 +83,19 @@ export function visibleEngineModels(engine: PrefsEngine, info: InfoWire | undefi
 export function visibleRows(provider: PrefsEngine, rows: readonly EngineModelRow[], prefs: ModelPrefsWire): EngineModelRow[] {
   const { hidden } = enginePrefs(prefs, provider)
   return rows.filter(row => row.custom === true || !hidden.includes(row.id))
+}
+
+/**
+ * Selector values of the model that a session used last. Claude Code records a full id such as `claude-opus-5-5`, and it lists `opus`.
+ * @param used - what the session file records.
+ * @param info - what the engine offers; undefined while the list loads, which keeps the recorded values.
+ * @returns the model and reasoning level to select; the reasoning level is empty if the model does not offer it.
+ */
+export function choiceFromUsed(used: UsedModelWire, info: InfoWire | undefined): { readonly model: string; readonly effort: string } {
+  const family = (value: string): string => value.replace(/\[.*$/, '')
+  const models = info?.models ?? []
+  const model = models.find(item => item.value === used.model) ?? models.find(item => item.value !== DEFAULT_VALUE && used.model.includes(family(item.value)))
+  return { model: model?.value ?? used.model, effort: used.effort !== undefined && (model === undefined || model.efforts.includes(used.effort)) ? used.effort : '' }
 }
 
 /** @param info - what the engine offers. @param modelId - model value. @returns the speed tier that selects fast mode on that model, if any. */
