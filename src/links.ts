@@ -38,6 +38,10 @@ export interface SwitchPlan {
   readonly catchup: string
   /** Newest source message the catch-up covers. */
   readonly deliveredThrough?: string
+  /** Messages with text that the other provider has not seen. */
+  readonly unseen: number
+  /** Whether the position of the last hand-over is no longer in the transcript. */
+  readonly gap: boolean
 }
 
 const TAG = 'agent-bridge-catchup'
@@ -54,6 +58,16 @@ const LABELS: Partial<Record<EngineName, string>> = { claude: 'Claude Code', cod
  */
 export function switchProviderOf(id: string): string | undefined {
   return id.startsWith(CLAUDE_ID_PREFIX) || id.startsWith(CODEX_ID_PREFIX) ? providerOfSession(id) : undefined
+}
+
+/** @param engine - engine. @returns its display name. */
+export function providerLabel(engine: EngineName): string {
+  return LABELS[engine] ?? engine
+}
+
+/** @param lines - content. @returns the content in the block that the transcript hides. */
+export function catchupBlock(lines: readonly string[]): string {
+  return [OPEN, ...lines, CLOSE].join('\n')
 }
 
 /** @param text - message text. @returns the text without catch-up blocks. */
@@ -164,6 +178,8 @@ export function planSwitch(links: readonly ThreadLink[], sourceId: string, targe
     ...targetId === undefined ? {} : { targetId },
     catchup: renderCatchup(providerEngine(from), messages.slice(at + 1), gap, limits),
     ...newest === undefined ? {} : { deliveredThrough: newest },
+    unseen: messages.slice(at + 1).filter(message => spokenText(message) !== '').length,
+    gap,
   }
 }
 

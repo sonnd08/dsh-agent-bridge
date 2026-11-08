@@ -293,6 +293,7 @@ await step('screen control: a read-only capture runs without asking and its imag
   await page.waitForTimeout(1500)
   const images = page.locator('[data-testid="ext-image"]')
   await images.first().waitFor({ timeout: 20000 }).catch(() => {})
+  await page.locator('[data-testid="ext-tool-run"]').last().click().catch(() => {})
   await page.locator('[data-testid="ext-tool-use"]').last().click()
   const toolNames = await page.locator('[data-testid="ext-tool-use"]').evaluateAll(els => els.slice(-3).map(e => (e.textContent ?? '').slice(0, 60)))
   const resultLens = await page.locator('[data-testid="ext-tool-result"]').evaluateAll(els => els.slice(-3).map(e => (e.textContent ?? '').length))

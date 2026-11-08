@@ -6,7 +6,7 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   ANSWER_PATH, ARCHIVE_PATH, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, engineOfSession, instanceOfSession, isDraftId, SEND_PATH, SESSION_PATH, WATCH_PATH,
-  type AnswerBodyWire, type GoalWire, type LiveEventWire, type ManageBodyWire, type MessageWire, type PermissionWire, type SendBodyWire, type SessionWire, type UsageWire, type AttachmentWire, type EngineName, type PermissionPreset,
+  type AnswerBodyWire, type GoalWire, type LiveEventWire, type ManageBodyWire, type MessageWire, type PermissionWire, type SendBodyWire, type SessionWire, type UsageWire, type UsedModelWire, type AttachmentWire, type EngineName, type PermissionPreset,
 } from '../protocol.ts'
 
 /** Transcript and live-turn state the panel renders. */
@@ -29,6 +29,7 @@ export interface TranscriptState {
   readonly goal?: GoalWire | undefined
   /** Token totals of the session, when the engine records them. */
   readonly usage?: UsageWire | undefined
+  readonly used?: UsedModelWire | undefined
   /** Number of recent turns shown when older ones were left out. */
   readonly recentTurns?: number | undefined
   readonly error?: string | undefined
@@ -162,7 +163,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
     const body = await response.json() as SessionWire
     if (mine !== generation) return false
     const written = body.messages.length > pendingBase
-    patch({ status: 'ready', messages: body.messages, goal: body.goal, usage: body.usage, recentTurns: body.recentTurns, ...written ? { pendingUser: undefined } : {} })
+    patch({ status: 'ready', messages: body.messages, goal: body.goal, usage: body.usage, used: body.used, recentTurns: body.recentTurns, ...written ? { pendingUser: undefined } : {} })
     return true
   }
   // At most one transcript request runs; refreshes asked for meanwhile collapse into one more request after it.

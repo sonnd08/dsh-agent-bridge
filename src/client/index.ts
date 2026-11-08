@@ -14,28 +14,23 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type { ExternalSessionSource } from '@deepseek-ai/dsh-client-ui-workspace/client'
-import { isEngineEnabled } from '../model-prefs.ts'
-import { currentModelPrefs } from './model-prefs-store.ts'
-import { currentProviders } from './providers-store.ts'
-import { loadInfo } from './info.ts'
-import { engineLabels } from './model-names.ts'
 import type { DshSwitchRequest } from './ExternalPanel.tsx'
 import { composeSwitchPrompt } from '../links.ts'
 import { publishRowIndicators, RowIndicators, type RowIndicator } from './RowIndicators.tsx'
-import { ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, DSH_IMPORT_PATH, SEEN_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, draftIdFor, engineOfSession, CHOICE_PATH, type ChoiceWire, type DshImportBodyWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
+import { ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, DSH_IMPORT_PATH, MIRROR_PATH, type MirrorSyncWire, SEEN_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, engineOfSession, type DshImportBodyWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
 import { applyEngineMarks } from './branding.tsx'
 import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
 import { createSessionsStore, type SessionRow } from './sessions.ts'
 import { ExternalPanel } from './ExternalPanel.tsx'
-import { EngineMark, EXTERNAL_MENU_KIND, EXTERNAL_PREFIX, graftWorkspaceBrowser, type ExternalMenuTarget, type GraftSlots } from './graft.tsx'
+import { connectRowMarks, EngineMark, EXTERNAL_MENU_KIND, EXTERNAL_PREFIX, graftWorkspaceBrowser, type ExternalMenuTarget, type GraftSlots } from './graft.tsx'
 import { createModeStore, withMode } from './mode.tsx'
 import { SessionsPage } from './SessionsPage.tsx'
 import { SettingsCard, type ExternalEnginesSection } from './SettingsCard.tsx'
 import { AboutSection } from './AboutSection.tsx'
 import { en, NS, zh, type ExternalEnginesKey } from './locales.ts'
-import { createTranscriptController, isDraft, type SendExtras } from './transcript.ts'
-import { createEngineStore, ProviderSeat, type CatalogStore, type NativePermission, type SeatServices } from './NewChat.tsx'
+import { createTranscriptController, isDraft } from './transcript.ts'
+import { ProviderSeat, type CatalogStore, type NativePermission, type SeatServices } from './NewChat.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -59,7 +54,7 @@ interface SeatContext {
   }
   readonly sessions: {
     readonly list: {
-      getSnapshot(): { readonly byId: Readonly<Record<string, { readonly cwd?: string; readonly blank?: boolean } | undefined>> }
+      getSnapshot(): { readonly byId: Readonly<Record<string, { readonly cwd?: string; readonly blank?: boolean; readonly running?: boolean; readonly projectionValues?: { readonly modelSelection?: { readonly next: { readonly provider: string } | null } } } | undefined>> }
       subscribe(listener: () => void): () => void
     }
     create(options: { readonly cwd: string }): Promise<string>
@@ -84,10 +79,10 @@ interface SeatSlots {
   entries(name: string): readonly { readonly component: unknown; readonly inject?: (sessionId: string) => unknown; readonly store?: { create(): { readonly actions: { openSection(id: string): void } } } }[]
 }
 
-/** The harness method that delivers a composer message. */
-interface ConversationSend {
-  sendSession(session: { readonly sessionId: string }, text: string, attachmentIds: readonly string[], mode: unknown, signal?: AbortSignal, accept?: () => void): Promise<{ kind: 'success' | 'error'; text?: string }>
-}
+/** Pause between two chat import calls while more chats wait. */
+const MIRROR_BUSY_MS = 2_000
+/** Pause between two chat import calls when nothing waits. */
+const MIRROR_IDLE_MS = 30_000
 
 /** Takes the place of the harness permission control, which moves into the selector footer. */
 const HiddenPermission = (): null => null
@@ -433,15 +428,10 @@ export function apply(ctx: ClientContext): void {
     action('fork', 300, (value, raw) => engineOfSession(raw) === 'pi' && running.has(raw) ? [] : [{ id: 'fork', label: t('menu.fork'), icon: { key: 'workspace.fork' }, run: () => { forkRow(raw, String(value.displayTitle ?? '')) } }])
     action('archive', 600, (_value, raw) => [{ id: 'archive', label: t('menu.archive'), icon: { key: 'workspace.archive' }, separatorBefore: true, run: () => { archiveRow(raw) } }])
   })
-  const engines = createEngineStore()
-  const startChat = (provider: string, text: string, cwd: string, extras: SendExtras): void => {
-    pendingCwd = cwd
-    open(draftIdFor(provider))
-    void transcript.send(text, cwd, extras)
-  }
   // The native seat's directory resolves through the caller's context, so remote.session must be injected here as well.
   ctx.inject(['sessions', 'modelDirectories', 'conversation', 'remote', 'remote.session'] as never, (seatCtx: ClientContext) => {
-    const { modelDirectories, sessions, conversation } = seatCtx as unknown as SeatContext
+    const { modelDirectories, sessions } = seatCtx as unknown as SeatContext
+    seatCtx.effect(() => connectRowMarks(sessions.list), 'agent-bridge: row marks follow the selected model')
     const known = new Map<string, SeatServices>()
     const servicesFor = (sessionId: string): { services: SeatServices } => {
       const existing = known.get(sessionId)
@@ -456,15 +446,12 @@ export function apply(ctx: ClientContext): void {
         ...directory === undefined ? {} : { catalog: directory.store },
         loadCatalog: () => { directory?.load().catch((error: unknown) => { console.warn('agent-bridge: model catalog failed', error) }) },
         selectModel: (selection) => { directory?.select(selection).catch((error: unknown) => { console.warn('agent-bridge: model selection failed', error) }) },
-        engines, openSettings: canOpenSettings() ? openSettings : undefined,
+        openSettings: canOpenSettings() ? openSettings : undefined,
         nativePermission: () => {
           const entry = seatSlots.entries('conversation.input.permission').find(item => item.component !== HiddenPermission && item.inject !== undefined)
           const injected = entry?.inject?.(sessionId) as { hooks?: { permissionCatalog?: NativePermission['catalog'] }; select?: NativePermission['select'] } | undefined
           return injected?.hooks?.permissionCatalog === undefined || injected.select === undefined ? undefined : { catalog: injected.hooks.permissionCatalog, select: injected.select }
         },
-        getCwd: () => sessions.list.getSnapshot().byId[sessionId]?.cwd ?? defaultCwd,
-        subscribeSessions: listener => sessions.list.subscribe(listener),
-        isBlank: () => sessions.list.getSnapshot().byId[sessionId]?.blank === true,
         codexEnabled: () => codexEnabled,
         subscribeBridge: listener => store.subscribe(listener),
       }
@@ -509,8 +496,40 @@ export function apply(ctx: ClientContext): void {
           return error instanceof Error ? error.message : String(error)
         }
       }
-      return () => { startDshSession = undefined; nativeBranchTargets = () => [] }
-    }, 'agent-bridge: switch to a DSH session')
+      let mirrorTimer: number | undefined
+      let mirrorStopped = false
+      /** Import Claude Code and Codex chats as DSH chats, and show their new turns there. */
+      const syncMirrors = async (): Promise<void> => {
+        let again = false
+        try {
+          const ready = Object.fromEntries(Object.entries(sessions.list.getSnapshot().byId).flatMap(([id, session]) => session === undefined || session.running === true ? [] : [[id, session.projectionValues?.modelSelection?.next?.provider ?? '']]))
+          const response = await fetch(MIRROR_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ready }) })
+          if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+          const { created, replays, more } = await response.json() as MirrorSyncWire
+          again = more
+          if (created.length > 0) await sessions.refresh()
+          for (const { sessionId, title } of created) {
+            const renamed = await remote.session.rename({ sessionId, title })
+            if (!renamed.ok) console.warn('agent-bridge: imported chat title failed', renamed.error.message)
+          }
+          for (const { sessionId, user } of replays) {
+            const sent = await remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: user }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+            if (!sent.ok) console.warn('agent-bridge: a turn from another app was not shown', sent.error.message)
+          }
+          if (created.length > 0 || replays.length > 0) void refresh()
+        } catch (error) {
+          console.warn('agent-bridge: chat import failed', error)
+        }
+        if (!mirrorStopped) mirrorTimer = window.setTimeout(() => { void syncMirrors() }, again ? MIRROR_BUSY_MS : MIRROR_IDLE_MS)
+      }
+      void syncMirrors()
+      return () => {
+        mirrorStopped = true
+        window.clearTimeout(mirrorTimer)
+        startDshSession = undefined
+        nativeBranchTargets = () => []
+      }
+    }, 'agent-bridge: switch to a DSH session and import chats')
     const seatSlots = slots as unknown as SeatSlots
     seatCtx.effect(() => seatSlots.inject('conversation.input.model', () => seatSlots.register({
       name: 'conversation.input.model', priority: -1, locale: NS, inject: servicesFor,
@@ -518,39 +537,6 @@ export function apply(ctx: ClientContext): void {
     seatCtx.effect(() => seatSlots.inject('conversation.input.permission', () => seatSlots.register({
       name: 'conversation.input.permission', priority: -1,
     }, HiddenPermission)), 'agent-bridge: permission moves to the selector')
-    // The native composer stays on screen; only the send of a blank session with Claude or Codex selected is routed here.
-    seatCtx.effect(() => {
-      const prototype = Object.getPrototypeOf(conversation) as ConversationSend
-      const original = prototype.sendSession
-      if (typeof original !== 'function') {
-        console.warn('agent-bridge: this DSH build has no conversation.sendSession; new chats stay with DSH')
-        return () => {}
-      }
-      prototype.sendSession = function (this: ConversationSend, session, text, attachmentIds, mode, signal, accept) {
-        const engine = engines.getSnapshot()
-        if (engine === 'dsh' || !currentProviders().some(item => item.id === engine) || !isEngineEnabled(currentModelPrefs(), engine) || sessions.list.getSnapshot().byId[session.sessionId]?.blank !== true) return original.call(this, session, text, attachmentIds, mode, signal, accept)
-        return startFromComposer(engine, session.sessionId, text, attachmentIds, accept)
-      }
-      return () => { prototype.sendSession = original }
-    }, 'agent-bridge: new-chat send routing')
-    const startFromComposer = async (engine: string, sessionId: string, text: string, attachmentIds: readonly string[], accept: (() => void) | undefined): Promise<{ kind: 'success' | 'error'; text?: string }> => {
-      const { attachments } = await conversation.serializeDraftAttachments(attachmentIds)
-      const images = attachments.flatMap(item => item.type === 'image' ? [{ name: item.name ?? 'image', mime: item.mediaType, base64: item.data }] : [])
-      if (images.length !== attachments.length) return { kind: 'error', text: t('picker.filesUnsupported') }
-      const response = await fetch(`${CHOICE_PATH}?${new URLSearchParams({ engine }).toString()}`, { credentials: 'same-origin' })
-      const choice = await response.json() as ChoiceWire
-      const cwd = sessions.list.getSnapshot().byId[sessionId]?.cwd ?? defaultCwd
-      const effort = engineLabels(engine, await loadInfo(engine, cwd).catch(() => undefined), choice).effortId
-      startChat(engine, text.trim() === '' ? t('composer.seeAttached') : text, cwd, {
-        ...choice.model === '' ? {} : { model: choice.model }, ...effort === '' ? {} : { effort },
-        ...choice.permission === undefined || choice.permission === '' ? {} : { permission: choice.permission },
-        ...choice.speed === undefined ? {} : { speed: choice.speed },
-        ...images.length === 0 ? {} : { attachments: images },
-      })
-      accept?.()
-      for (const id of attachmentIds) conversation.releaseDraftAttachment(id)
-      return { kind: 'success' }
-    }
   })
   ctx.effect(() => () => { transcript.close() }, 'agent-bridge: transcript teardown')
   // Re-list when the row limit changes and when the tab becomes visible again (sessions created in a terminal).

@@ -8,6 +8,23 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 
 ## What's new
 
+### 0.4.0
+
+<img src="docs/images/whats-new-0.4.0.png" alt="The model selector in a chat, with DeepSeek, Codex and Claude Code rails, the Claude models and their reasoning levels." width="520">
+
+- Claude Code and Codex now run inside a DeepSeek Harness chat. A model change stays in the same chat, with the normal chat view, right sidebar and header.
+- The model button shows the Claude Code, Codex and DeepSeek rails in every chat, with the real models and reasoning levels of each provider.
+- If the new provider has not seen the latest messages, it gets a file of the conversation.
+- The icon of each chat in the sidebar shows the provider of its selected model.
+- A Claude Code or Codex chat that gets a new turn appears as a normal DeepSeek Harness chat and stays up to date. Older chats with no new turn are not imported.
+- Claude Code background tasks are off in these chats. The Standard / Fast control is not available for these providers yet.
+
+### 0.3.2
+
+- A chat that moves to a DeepSeek model no longer stops after the first message.
+- A switch between Claude and Codex now gives the new provider a file of the conversation. It looks at the last 30 messages and reads further only if it needs more.
+- Tool calls fold into one row, such as **Created PR #2** or **Ran commands, read files**. Open the row to see each call. Internal calls are hidden.
+
 ### 0.3.1
 
 - The image of version 0.3.0 now shows the real provider selector.
@@ -33,7 +50,7 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 - **Provider selector.** The model button shows a provider rail, a model search and a reasoning column. On a new chat, select Claude or Codex to start that provider's session from the DSH composer. The footer of the selector has Standard / Fast and the access control, and the chat bar shows the current access and a Fast mark.
 - **Model management.** Settings → Agent Bridge reorders models, hides the ones you do not use, marks favorites, and adds custom model IDs for Claude and Codex.
 - **More than one Claude or Codex account.** Settings → Agent Bridge → **+ Add provider** adds an instance with its own home folder (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), login and sessions. The DeepSeek Harness models are always in the provider list. To sign in to an instance, run the command that its settings page shows. A removal does not delete the home folder.
-- **Switch provider in a conversation.** Select the other provider in an open Claude or Codex session. The next message goes to that provider's thread, with the user and assistant text it has not seen. Tool calls and tool results are not passed on. The two threads show as one row.
+- **Switch provider in a conversation.** Select the other provider in an open Claude or Codex session. The next message goes to that provider's thread. If there are new messages, the provider reads them from a file of the conversation. The two threads show as one row.
 - **Continue on a DeepSeek model.** Select a DeepSeek Harness model in an open Claude or Codex chat. The next message starts a new DSH session that shows the old messages and sends them to the model as history. The old chat stays in the list. Tool calls, thinking and attachments do not move.
 - **Row indicators.** A blue dot shows a Claude or Codex session that changed after you last opened it. An icon shows if the branch of the session is merged (purple), has an open pull request (green) or has commits that are not merged (gray). Pull request states need the GitHub CLI `gh`.
 - **Fork a session.** The row menu has **Fork session**. Claude and Codex use their own fork, and DeepSeek Harness sessions use the DSH fork. A fork of a conversation that switched provider keeps the whole transcript.

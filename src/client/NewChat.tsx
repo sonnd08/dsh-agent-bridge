@@ -1,56 +1,18 @@
-/** Provider selection in the harness composer: the model seat, and the store that says which provider a new chat uses. */
+/** Provider selection in the harness composer: the model seat. Each provider is a route of the harness model catalog. */
 import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import {
   PermissionIconAutoReviewRegular, PermissionIconFullAccessRegular, PermissionIconReadOnlyRegular, PermissionIconWorkspaceWriteRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useChoices } from './ComposerBar.tsx'
-import { useInfos } from './info.ts'
-import { engineLabels, fastTierOf, speedFor, visibleEngineModels, visibleRows, type EngineModelRow } from './model-names.ts'
+import { visibleEngineModels, visibleRows, type EngineModelRow } from './model-names.ts'
 import { publishDshCatalog } from './dsh-catalog-store.ts'
 import { useProviders } from './providers-store.ts'
 import { useModelPrefs } from './model-prefs-store.ts'
 import { enginePrefs, isEngineEnabled, orderRows, pickEffort, toggleFavorite } from '../model-prefs.ts'
-import { bridgeAccessOptions, PermissionPicker, PermissionPopover, type PermissionOption } from './PermissionPicker.tsx'
+import { PermissionPicker, PermissionPopover, type PermissionOption } from './PermissionPicker.tsx'
 import { ProviderPicker, type PickerCurrent, type PickerEngine, type PickerGroup } from './ProviderPicker.tsx'
 import type { Translate } from './ToolCard.tsx'
-import type { InfoWire, ModelPrefsWire, PermissionPreset, PrefsEngine } from '../protocol.ts'
-
-/** Provider a new chat starts with: `dsh` or a provider id. */
-export type NewChatEngine = string
-
-/** Observable provider of new chats, kept between chats and page loads. */
-export interface EngineStore {
-  getSnapshot(): NewChatEngine
-  subscribe(listener: () => void): () => void
-  set(next: NewChatEngine): void
-}
-
-const ENGINE_KEY = 'agent-bridge:new-chat-engine'
-
-/** @returns the store, starting from the provider of the last new chat. */
-export function createEngineStore(): EngineStore {
-  let engine: NewChatEngine = 'dsh'
-  try {
-    const stored = localStorage.getItem(ENGINE_KEY)
-    if (stored !== null && stored !== '') engine = stored
-  } catch { /* the choice lasts for this page */ }
-  const listeners = new Set<() => void>()
-  return {
-    getSnapshot: () => engine,
-    subscribe(listener) {
-      listeners.add(listener)
-      return () => { listeners.delete(listener) }
-    },
-    set(next) {
-      if (next === engine) return
-      engine = next
-      try {
-        localStorage.setItem(ENGINE_KEY, next)
-      } catch { /* the choice lasts for this page */ }
-      for (const listener of listeners) listener()
-    },
-  }
-}
+import { routeOf } from '../native-routes.ts'
+import type { InfoWire, ModelPrefsWire, PrefsEngine } from '../protocol.ts'
 
 /** One provider of the harness model catalog. */
 interface CatalogGroup {
@@ -90,10 +52,6 @@ export interface SeatServices {
   readonly catalog?: CatalogStore | undefined
   readonly loadCatalog: () => void
   readonly selectModel: (selection: { provider: string; model: string; reasoningEffort?: string }) => void
-  readonly engines: EngineStore
-  readonly getCwd: () => string
-  readonly subscribeSessions: (listener: () => void) => () => void
-  readonly isBlank: () => boolean
   readonly codexEnabled: () => boolean
   /** Calls back when the plugin learns its configuration from the host, after a page load. */
   readonly subscribeBridge: (listener: () => void) => () => void
@@ -162,71 +120,56 @@ function NativeAccess({ native, useProjection, t }: { native: NativePermission; 
  * @returns the picker.
  */
 export function ProviderSeat({ locked, services, useProjection, t }: { locked?: boolean; services: SeatServices; useProjection: (name: 'permissions') => { readonly currentValue: string } | undefined; t: Translate }) {
-  const { catalog, loadCatalog, selectModel, engines, getCwd, subscribeSessions, isBlank, codexEnabled, subscribeBridge, nativePermission } = services
+  const { catalog, loadCatalog, selectModel, codexEnabled, subscribeBridge, nativePermission } = services
   const state = useSyncExternalStore(catalog?.subscribe ?? noSubscribe, catalog?.getSnapshot ?? noCatalog)
-  const stored = useSyncExternalStore(engines.subscribe, engines.getSnapshot)
-  const blank = useSyncExternalStore(subscribeSessions, isBlank)
   useEffect(() => { loadCatalog() }, [loadCatalog])
-  const cwd = getCwd()
   const codexAvailable = useSyncExternalStore(subscribeBridge, codexEnabled)
   const [prefs, savePrefs] = useModelPrefs()
   const { providers } = useProviders()
   const offered = providers.filter(provider => (provider.engine !== 'codex' || codexAvailable) && isEngineEnabled(prefs, provider.id))
-  const offeredIds = offered.map(provider => provider.id)
-  const infos = useInfos(blank ? offeredIds : [], cwd)
-  const choices = useChoices(offeredIds)
-  const selected = stored !== 'dsh' && !offeredIds.includes(stored) ? 'dsh' : stored
+  const engineRoutes = useMemo(() => new Set(providers.map(provider => routeOf(provider.id))), [providers])
 
-  const dshRows = useMemo((): EngineModelRow[] => dshProviderOrder(state.groups).flatMap(group => group.models.map(model => ({
+  const dshRows = useMemo((): EngineModelRow[] => dshProviderOrder(state.groups.filter(group => !engineRoutes.has(group.id))).flatMap(group => group.models.map(model => ({
     id: `${group.id}/${model.id}`, name: model.name, description: group.name, efforts: model.reasoning?.efforts ?? [],
-  }))), [state.groups])
+  }))), [state.groups, engineRoutes])
   useEffect(() => { if (dshRows.length > 0) publishDshCatalog(dshRows) }, [dshRows])
+  const loading = state.error ?? (state.status === 'loading' ? t('picker.loading') : undefined)
   const dshGroup: PickerGroup = {
     engine: 'dsh',
     label: t('picker.dsh'),
     models: visibleRows('dsh', orderRows(dshRows, enginePrefs(prefs, 'dsh').order), prefs),
-    status: state.error ?? (state.status === 'loading' ? t('picker.loading') : undefined),
+    status: loading,
   }
-  const groups: readonly PickerGroup[] = blank
-    ? [dshGroup, ...offered.map(provider => engineGroup(provider.id, provider.label, infos[provider.id]?.info, infos[provider.id]?.error, prefs, t, provider.accent))]
-    : [dshGroup]
+  // Claude Code and Codex are routes of the harness catalog, so a pick changes the model of this chat.
+  const engineGroups = offered.map((provider): PickerGroup => {
+    const models = state.groups.find(group => group.id === routeOf(provider.id))?.models ?? []
+    return {
+      engine: provider.id, label: provider.label, status: loading, ...provider.accent === undefined ? {} : { accent: provider.accent },
+      models: models.map(model => ({ id: model.id, name: model.name, description: provider.label, efforts: model.reasoning?.efforts ?? [] })),
+    }
+  })
+  const groups: readonly PickerGroup[] = [dshGroup, ...engineGroups]
 
-  const engine: PickerEngine = blank ? selected : 'dsh'
-  const external = engine !== 'dsh'
-  const externalInfo = infos[engine]?.info
-  const [externalChoice, setExternalChoice] = choices[engine] ?? [{ model: '', effort: '' }, () => {}]
-  let current: PickerCurrent
-  let label: string
-  let effortLabel: string
-  if (external) {
-    const labels = engineLabels(engine, externalInfo, externalChoice)
-    current = { engine, modelId: labels.modelId, effort: labels.effortId }
-    label = labels.label
-    effortLabel = labels.effort
-  } else {
-    const model = state.groups.find(group => group.id === state.current?.provider)?.models.find(item => item.id === state.current?.model)
-    const effort = state.current?.reasoningEffort ?? model?.reasoning?.defaultEffort ?? ''
-    current = { engine: 'dsh', modelId: state.current === null ? '' : `${state.current.provider}/${state.current.model}`, effort }
-    label = model?.name ?? state.current?.model ?? t('picker.title')
-    effortLabel = model?.reasoning?.efforts.find(level => level.id === effort)?.name ?? ''
+  const selectedModel = state.groups.find(group => group.id === state.current?.provider)?.models.find(item => item.id === state.current?.model)
+  const selectedEffort = state.current?.reasoningEffort ?? selectedModel?.reasoning?.defaultEffort ?? ''
+  const selectedRail = state.current === null ? undefined : providers.find(provider => routeOf(provider.id) === state.current?.provider)?.id
+  const engine: PickerEngine = selectedRail ?? 'dsh'
+  const current: PickerCurrent = {
+    engine,
+    modelId: state.current === null ? '' : selectedRail === undefined ? `${state.current.provider}/${state.current.model}` : state.current.model,
+    effort: selectedEffort,
   }
+  const label = selectedModel?.name ?? state.current?.model ?? t('picker.title')
+  const effortLabel = selectedModel?.reasoning?.efforts.find(level => level.id === selectedEffort)?.name ?? ''
 
   const pick = (target: PickerEngine, modelId: string, explicit: string | undefined): void => {
     const supported = groups.find(group => group.engine === target)?.models.find(model => model.id === modelId)?.efforts.map(level => level.id) ?? []
     const { effort, prefs: nextPrefs } = pickEffort(prefs, { key: `${current.engine}/${current.modelId}`, effort: current.effort }, { key: `${target}/${modelId}`, efforts: supported }, explicit)
     if (nextPrefs !== prefs) savePrefs(nextPrefs)
-    if (target !== 'dsh') {
-      const entry = choices[target]
-      if (entry === undefined) return
-      const [choice, set] = entry
-      const speed = speedFor(infos[target]?.info, modelId, choice.speed)
-      set({ ...choice, model: modelId, effort, ...speed === undefined ? {} : { speed } })
-      engines.set(target)
-      return
-    }
-    engines.set('dsh')
+    const route = target === 'dsh' ? undefined : routeOf(target)
     for (const group of state.groups) {
-      const model = group.models.find(item => `${group.id}/${item.id}` === modelId)
+      if (route !== undefined && group.id !== route) continue
+      const model = group.models.find(item => (route === undefined ? `${group.id}/${item.id}` : item.id) === modelId)
       if (model === undefined) continue
       const level = effort !== '' ? effort : model.reasoning?.defaultEffort
       selectModel({ provider: group.id, model: model.id, ...level === undefined ? {} : { reasoningEffort: level } })
@@ -234,23 +177,17 @@ export function ProviderSeat({ locked, services, useProjection, t }: { locked?: 
     }
   }
 
-  const fastTier = external ? fastTierOf(externalInfo, current.modelId) : undefined
-  const native = external ? undefined : nativePermission()
+  const native = nativePermission()
   const nativeSelection = useProjection('permissions')
   const nativeCatalog = useSyncExternalStore(native?.catalog.subscribe ?? noSubscribe, native?.catalog.getSnapshot ?? noPermissionCatalog).value
-  const accessChip = external
-    ? <PermissionPopover options={bridgeAccessOptions(t)} value={externalChoice.permission ?? ''} locked={locked} onChange={(permission) => { setExternalChoice({ ...externalChoice, permission: permission as PermissionPreset | '' }) }} t={t} />
-    : native === undefined || nativeCatalog === null || nativeSelection === undefined
-      ? undefined
-      : <PermissionPopover options={nativeAccessOptions(nativeCatalog.options, t)} value={nativeSelection.currentValue} riskValues={RISKY_NATIVE_PRESETS} locked={locked} onChange={(preset) => { void native.select(preset).catch((error: unknown) => { console.warn('agent-bridge: permission change failed', error) }) }} t={t} />
+  const accessChip = native === undefined || nativeCatalog === null || nativeSelection === undefined
+    ? undefined
+    : <PermissionPopover options={nativeAccessOptions(nativeCatalog.options, t)} value={nativeSelection.currentValue} riskValues={RISKY_NATIVE_PRESETS} locked={locked} onChange={(preset) => { void native.select(preset).catch((error: unknown) => { console.warn('agent-bridge: permission change failed', error) }) }} t={t} />
   return (
     <ProviderPicker
       groups={groups} current={current} label={label} effortLabel={effortLabel} locked={locked}
       favorites={prefs.favorites} onToggleFavorite={(key) => { savePrefs(toggleFavorite(prefs, key)) }} onPick={pick} accessChip={accessChip} onOpenSettings={services.openSettings} savedEfforts={prefs.efforts}
-      speed={external ? { available: fastTier !== undefined, fast: fastTier !== undefined && (externalChoice.speed ?? '') !== '', onChange: (fast) => { setExternalChoice({ ...externalChoice, speed: fast ? fastTier ?? '' : '' }) } } : undefined}
-      access={external
-        ? <PermissionPicker value={externalChoice.permission ?? ''} onChange={(permission) => { setExternalChoice({ ...externalChoice, permission: permission as PermissionPreset | '' }) }} t={t} />
-        : native === undefined ? undefined : <NativeAccess native={native} useProjection={useProjection} t={t} />}
+      access={native === undefined ? undefined : <NativeAccess native={native} useProjection={useProjection} t={t} />}
       t={t}
     />
   )

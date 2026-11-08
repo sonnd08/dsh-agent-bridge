@@ -2,7 +2,7 @@
  * Read-only access to Claude Code sessions stored by the local `claude` CLI. Listing and transcript
  * parsing go through the Claude Agent SDK; the SDK honors `CLAUDE_CONFIG_DIR`.
  */
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { open, readFile, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { deleteSession, forkSession, getSessionMessages, listSessions, renameSession } from '@anthropic-ai/claude-agent-sdk'
@@ -75,13 +75,51 @@ function withClaudeHome<T>(home: string | undefined, work: () => Promise<T>): Pr
  */
 export async function listClaudeRows(limit: number, home?: string): Promise<SessionRowWire[]> {
   const sessions = await withClaudeHome(home, () => listSessions({ limit }))
-  return sessions.map(info => ({
+  return await Promise.all(sessions.map(async info => ({
     id: `${CLAUDE_ID_PREFIX}${info.sessionId}`,
     title: info.customTitle ?? info.summary ?? info.firstPrompt ?? info.sessionId,
-    cwd: info.cwd ?? '',
+    cwd: info.cwd !== undefined && info.cwd !== '' ? info.cwd : await folderOfSession(info.sessionId, home),
     updatedAt: info.lastModified,
     ...info.gitBranch === undefined ? {} : { branch: info.gitBranch },
-  }))
+  })))
+}
+
+const CWD_READ_BYTES = 1 << 20
+const CWD_FIELD = /"cwd":("(?:[^"\\]|\\.)*")/
+const knownFolders = new Map<string, string>()
+
+/**
+ * Find the first working folder that a session file records. A `"cwd"` key inside a stored text has escaped quotes, so only a real field matches.
+ * @param file - path of the session file.
+ * @returns the folder, or an empty string when the file records none.
+ */
+export async function firstRecordedCwd(file: string): Promise<string> {
+  const handle = await open(file, 'r')
+  try {
+    const buffer = Buffer.alloc(CWD_READ_BYTES)
+    let kept = ''
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, CWD_READ_BYTES)
+      if (bytesRead === 0) return ''
+      const text = kept + buffer.toString('latin1', 0, bytesRead)
+      const found = CWD_FIELD.exec(text)
+      if (found?.[1] !== undefined) return JSON.parse(Buffer.from(found[1], 'latin1').toString('utf8')) as string
+      // A field can cross two reads, so the end of this read is searched again with the next one.
+      kept = text.slice(-8192)
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+/** The SDK reads only the two ends of a session file, and a long session can have no `cwd` field there. */
+async function folderOfSession(sessionId: string, home: string | undefined): Promise<string> {
+  const known = knownFolders.get(sessionId)
+  if (known !== undefined) return known
+  const file = await findClaudeFile(sessionId, home)
+  const folder = file === undefined ? '' : await firstRecordedCwd(file)
+  if (folder !== '') knownFolders.set(sessionId, folder)
+  return folder
 }
 
 function summarizeInput(input: unknown): string {

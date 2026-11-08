@@ -207,7 +207,12 @@ export interface SessionWire {
   readonly usage?: UsageWire
   /** Number of recent turns read when older turns were left out; absent when the whole session is included. */
   readonly recentTurns?: number
+  /** Model of the last turn; absent when the session file records none. */
+  readonly used?: UsedModelWire
 }
+
+/** The model and reasoning level of a session's last turn, as the engine recorded them. */
+export interface UsedModelWire { readonly model: string; readonly effort?: string; /** Time of the turn, in milliseconds. */ readonly at?: number }
 
 /** Token totals. */
 export interface UsageWire { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number }
@@ -403,6 +408,15 @@ export const CHOICE_PATH = '/api/agent-bridge/choice'
 export const ARCHIVE_PATH = '/api/agent-bridge/archive'
 /** Creates a DSH session that holds the history of a conversation. */
 export const DSH_IMPORT_PATH = '/api/agent-bridge/dsh-import'
+/** POST: import Claude Code and Codex chats as DSH chats, and find the turns that those chats have not shown. */
+export const MIRROR_PATH = '/api/agent-bridge/mirror'
+/** Answer of the mirror route. */
+export interface MirrorSyncWire {
+  readonly created: readonly { readonly sessionId: string; readonly title: string }[]
+  readonly replays: readonly { readonly sessionId: string; readonly user: string }[]
+  /** More chats wait for import. */
+  readonly more: boolean
+}
 
 /** Body of the DSH import route. */
 export interface DshImportBodyWire {

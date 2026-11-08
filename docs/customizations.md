@@ -29,6 +29,72 @@ Copy this template to the top of the **Log** section.
 
 Put the newest entry first.
 
+### 2026-11-09: Updated chats become DSH chats
+
+- **What:** If a Claude Code or Codex chat has a new turn, the bridge imports it as a native DSH chat, and the old panel row goes away. Later turns made outside DSH appear in that DSH chat as they were written, and the engine does not run again. A message sent from the DSH chat continues the same Claude or Codex thread. Chats with no new turn stay as they are.
+- **Why:** The user wants updated chats in one place.
+- **Files:** `src/mirror.ts`, `src/dsh-import.ts`, `src/native-engine.ts`, `src/used-model.ts`, `src/extras.ts`, `src/protocol.ts`, `src/index.ts`, `src/client/index.ts`, `tests/mirror.test.mjs`, `tests/native-engine.test.mjs`, `tests/used-model.test.mjs`.
+- **Upstream merge risk:** Medium.
+- **Limits:** The import holds text only, not tool calls, and at most 400,000 characters. A finished turn appears at once, and the last turn waits until the chat is quiet for 20 seconds, so a long pause inside a turn can leave the rest of that turn out. A chat changed to another provider in DSH gets no more outside turns until it changes back.
+- **Verified:** All 222 unit tests pass. In the DSH desktop app, a turn made with `claude -p --resume` appeared in the DSH chat with no engine run. A message sent from the DSH chat continued the same thread and did not show twice after later checks. Chats with no new turn were not imported.
+
+### 2026-11-09: Open chat shows the model that it used
+
+- **What:** The bridge reads the model and reasoning level of the last turn from the Claude or Codex session file. The panel shows them for an open chat, and the next message uses them. A pick in the chat applies until a turn uses it. The access setting does not change.
+- **Why:** The panel showed the provider's last saved model, so a chat made in Claude Code on Opus showed Claude Haiku and sent the next message with Haiku.
+- **Files:** `src/used-model.ts`, `src/protocol.ts`, `src/index.ts`, `src/client/transcript.ts`, `src/client/model-names.ts`, `src/client/ExternalPanel.tsx`, `tests/used-model.test.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** Unit tests pass. In the DSH desktop app, a chat made in Claude Code on Opus with High effort opened as Claude Opus 5.5 High while the saved Claude model was Haiku. The Codex reader returned the right model from a real session file. A Codex chat was not opened in the panel.
+
+### 2026-11-09: Row icon follows the selected model
+
+- **What:** A DSH chat row shows the Claude, Codex or DeepSeek mark of the chat's selected model. An external row keeps the mark of its engine.
+- **Why:** All native chats showed the DeepSeek mark after Claude Code and Codex became DSH providers.
+- **Files:** `src/client/graft.tsx`, `src/client/index.ts`, `src/native-routes.ts`, `tests/native-engine.test.mjs`.
+- **Upstream merge risk:** Low. The mark reads the `modelSelection` value of the DSH session list.
+- **Verified:** The `native-engine` unit tests pass. In the DSH desktop app, rows showed the Claude, Codex and DeepSeek marks. A change from a Codex model to Claude Haiku changed the row mark at once, with no restart and no message.
+
+### 2026-11-09: Folder of a long Claude session
+
+- **What:** If the SDK gives no folder for a Claude session, the bridge reads the first `cwd` field from the session file and keeps it in memory. The panel uses the default folder if the file has no folder.
+- **Why:** The SDK reads only the first and last 64 KB of a file. A long session got an empty folder, and the switch to a DeepSeek model failed with `failed to ensure project directory ""`.
+- **Files:** `src/claude.ts`, `src/client/ExternalPanel.tsx`, `tests/claude-folder.test.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** All 210 unit tests pass. A list of real Claude sessions has no empty folder, and a long session that the SDK reports with no folder gets its folder. The DeepSeek switch from that chat is not repeated, because it creates a new session from a real chat.
+
+### 2026-11-09: Claude Code and Codex in one DSH chat
+
+- **What:** Claude Code and Codex are model providers of a DSH session, on the routes `claude-code` and `codex-cli`. Added instances use their own id as the route. A model change stays in the same chat, with the native DSH chat view, right sidebar and header. Each engine runs its own tools, and the `engine_tool` proxy records each call in the DSH session. The provider selector shows Claude Code and Codex rails in every chat, with the real model lists and reasoning levels. A new chat no longer starts a separate bridge session.
+- **Why:** The bridge made a second chat for each provider switch. The user wants one chat.
+- **Files:** `src/native-engine.ts`, `src/native-codex.ts`, `src/native-routes.ts`, `src/codex.ts`, `src/index.ts`, `src/extras.ts`, `src/client/NewChat.tsx`, `src/client/index.ts`, `tests/native-engine.test.mjs`.
+- **Upstream merge risk:** Medium. The change replaces the model seat logic and uses the DSH `llm.registerAdapter` service.
+- **Limits:** The engine runs one process for each turn, so Claude Code background tasks are off in these chats. The selector has no Standard / Fast control for these rails. Engine questions (`AskUserQuestion`, Codex user input) are refused. Images do not go to the engines. Old Claude and Codex threads still open in the bridge panel.
+- **Verified:** 206 unit tests pass. In the DSH desktop app, one chat changed from Claude Haiku to a DeepSeek route and back, and Claude read the hand-over file. Tool calls, a restart, Stop during a command and a message after Stop worked. The Claude Code, Codex and DeepSeek rails show in an open chat. With a Codex model, Codex ran a shell command and replied in a new chat, and the chat title came from Codex. In that chat, Codex changed to Claude Haiku and back, and each engine read the hand-over file. Stop during a Codex command and the Ask permission path are not tested in the app.
+
+### 2026-11-09: Provider switch points to a file
+
+- **What:** A Claude and Codex switch checks for messages that the other provider has not seen. If there are none, the message goes as typed. If there are some, the bridge writes the conversation to a Markdown file in `handoffs` beside the bridge state, and tells the provider to look at the last 30 messages and read further only if it needs more. The file has no size limit, and it holds the whole conversation of all earlier providers. Tool calls are listed by name, and tool output is left out. If the file cannot be written, the old catch-up text is sent.
+- **Why:** The provider reads what it needs, and a long chat is no longer cut to 24,000 characters.
+- **Files:** `src/handoff.ts`, `src/links.ts`, `src/extras.ts`, `src/run.ts`, `src/index.ts`, `tests/handoff.test.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** `handoff` and `links` unit tests pass. In the DSH desktop app, Codex with Workspace Write and Claude Haiku with Default permission each opened the file without an approval and answered from it. A softer instruction was skipped by Claude Haiku, so the read is written as a required first step.
+
+### 2026-11-09: DeepSeek import survives a reload
+
+- **What:** After the import, the bridge releases the agent that it created. The DSH session controller loads the stored session on the next call and owns the agent.
+- **Why:** The agent lived as long as the bridge plugin. A turn stopped with `aborted: disposed` about 2 seconds after a switch that changed the default model, and the session showed "Session unavailable".
+- **Files:** `src/index.ts`.
+- **Upstream merge risk:** Low.
+- **Verified:** In the DSH desktop app, a switch that changed the default model ran a 19-second turn to the end. The imported history was correct, and a follow-up message worked.
+
+### 2026-11-09: Folded tool rows
+
+- **What:** The Claude and Codex panel folds the tool calls between two pieces of text into one row. The row names a result, such as **Created PR #2**, else the largest kinds of work, such as **Ran commands, read files**. While the turn runs, the row shows the newest call. One plain call stays an ordinary row. Internal calls, such as `update_plan`, `wrap_up` and `ToolSearch`, are hidden unless they fail. Rows show short MCP names and no raw JSON. Checklists move into the fold.
+- **Why:** A list of raw tool rows was hard to read.
+- **Files:** `src/client/tool-runs.ts`, `src/client/ToolCard.tsx`, `src/client/ToolCard.module.css`, `src/client/ExternalPanel.tsx`, `src/client/locales.ts`, `tests/tool-runs.test.mjs`, `tests/e2e.mjs`, `tests/e2e-chat.mjs`.
+- **Upstream merge risk:** Low. `ToolCard.tsx` is the only upstream file with a real change.
+- **Verified:** `tool-runs` and `timeline` unit tests pass. In the DSH desktop app, real Claude sessions showed the folded rows and the result titles, and a fold opened to its calls. The end-to-end tests were changed but not run, because they need a separate `dsh web` instance.
+
 ### 2026-11-09: Version 0.3.0 and repository rules
 
 - **What:** The version is 0.3.0. Both README files have a **What's new** section with an image. `AGENTS.md` now requires a version bump, a **What's new** entry and an image for a new feature, and it forbids sensitive data. The build removes the local folder from `lib/`.

@@ -35,6 +35,8 @@ export interface TurnOptions {
   readonly speed?: string
   /** `CLAUDE_CONFIG_DIR` of an added instance. */
   readonly configDir?: string
+  /** Folders outside the working folder that the turn can read. */
+  readonly additionalDirectories?: readonly string[]
   /** Launch arguments of an added instance. */
   readonly extraArgs?: Record<string, string | null>
   /** Images embedded in the message. */
@@ -89,7 +91,11 @@ function toQuestions(input: Record<string, unknown>): QuestionWire[] {
   }))
 }
 
-function baseOptions(options: TurnOptions): Options {
+/**
+ * @param options - turn options.
+ * @returns the Claude SDK options of the turn.
+ */
+export function baseOptions(options: TurnOptions): Options {
   return {
     cwd: options.cwd,
     ...options.sessionId === undefined ? {} : { resume: options.sessionId },
@@ -120,6 +126,7 @@ function baseOptions(options: TurnOptions): Options {
     ...isEffort(options.effort) ? { effort: options.effort } : {},
     ...options.speed === undefined ? {} : { settings: { fastMode: options.speed !== '' } as NonNullable<Options['settings']> },
     settingSources: ['user', 'project', 'local'],
+    ...options.additionalDirectories === undefined ? {} : { additionalDirectories: [...options.additionalDirectories] },
     env: { ...childEnv(), CLAUDE_CONFIG_DIR: options.configDir ?? configuredClaudeDir() },
     ...options.extraArgs === undefined ? {} : { extraArgs: options.extraArgs },
   }
