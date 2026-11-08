@@ -8,11 +8,13 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 
 ## What's new
 
+### 0.3.1
+
+- The image of version 0.3.0 now shows the real provider selector.
+
 ### 0.3.0
 
-<img src="docs/images/whats-new-0.3.0.png" alt="A mock-up of the provider selector, the Add provider dialog, the sidebar row indicators and a conversation that moves between providers." width="900">
-
-The image is a mock-up with invented data.
+<img src="docs/images/whats-new-0.3.0.png" alt="The provider selector with a rail of providers, a model list, reasoning levels, Standard and Fast, and the access control." width="640">
 
 - **Provider selector.** Select the provider, model, reasoning level, speed and access in one popup. Favorites, model order, hidden models and custom models are in Settings → Agent Bridge.
 - **More than one account.** Add Claude and Codex instances. Each instance has its own home folder, login and sessions.
