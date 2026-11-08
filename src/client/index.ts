@@ -14,7 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type { ExternalSessionSource } from '@deepseek-ai/dsh-client-ui-workspace/client'
-import { ARCHIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
+import { ARCHIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, type EngineName, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
 import { applyEngineMarks } from './branding.tsx'
 import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
@@ -26,7 +26,9 @@ import { SessionsPage } from './SessionsPage.tsx'
 import { SettingsCard, type ExternalEnginesSection } from './SettingsCard.tsx'
 import { AboutSection } from './AboutSection.tsx'
 import { en, NS, zh, type ExternalEnginesKey } from './locales.ts'
-import { createTranscriptController, isDraft } from './transcript.ts'
+import { createTranscriptController, isDraft, type SendExtras } from './transcript.ts'
+import { ModelsSection } from './ModelsSection.tsx'
+import { createEngineStore, NewChatComposer, ProviderSeat, type CatalogStore, type SeatServices } from './NewChat.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -35,8 +37,31 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
+/** Harness services the provider selector reads; optional, so the plugin still loads without them. */
+interface SeatContext {
+  readonly modelDirectories: {
+    directoryFor(sessionId: string): {
+      readonly store: CatalogStore
+      load(): Promise<unknown>
+      select(selection: { provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
+    }
+  }
+  readonly sessions: {
+    readonly list: {
+      getSnapshot(): { readonly byId: Readonly<Record<string, { readonly cwd?: string; readonly blank?: boolean } | undefined>> }
+      subscribe(listener: () => void): () => void
+    }
+  }
+}
+
+/** The conversation slots the provider selector registers in; their types belong to the harness conversation package. */
+interface SeatSlots {
+  inject(name: string, factory: () => unknown): () => void
+  register(options: Record<string, unknown>, component: unknown): unknown
+}
+
 /** Services this plugin requires. */
-export const inject = ['slots', 'locale', 'layout', 'configForms', 'uiWorkspace']
+export const inject =['slots', 'locale', 'layout', 'configForms', 'uiWorkspace']
 
 /** Entry id of the plugin row the bundle patch inserts; its config is this plugin's settings. */
 const ENTRY_ID = 'agent-bridge'
@@ -98,6 +123,15 @@ export function apply(ctx: ClientContext): void {
       const row = { id, title: prompt.slice(0, 80), cwd, updatedAt: Date.now() }
       created.set(id, row)
       wireRows = [row, ...wireRows.filter(existing => existing.id !== id)]
+      rows = [...draftRows(), ...wireRows]
+      selectedId = id
+      publish()
+    },
+    onSwitched(fromId, id, cwd, prompt) {
+      const row = { id, title: prompt.slice(0, 80), cwd, updatedAt: Date.now() }
+      created.delete(fromId)
+      created.set(id, row)
+      wireRows = [row, ...wireRows.filter(existing => existing.id !== id && existing.id !== fromId)]
       rows = [...draftRows(), ...wireRows]
       selectedId = id
       publish()
@@ -257,7 +291,7 @@ export function apply(ctx: ClientContext): void {
     key: PANEL_ID,
     locale: NS,
     inject: () => ({
-      hooks: { selection: store, transcript }, controller: transcript, getDefaultCwd: () => defaultCwd, alwaysAllow, clearSelection, openSession: open, takePendingCwd,
+      hooks: { selection: store, transcript }, controller: transcript, getDefaultCwd: () => defaultCwd, codexEnabled: () => codexEnabled, alwaysAllow, clearSelection, openSession: open, takePendingCwd,
       // The frame marks a collapsed sidebar column on its root; ctx.layout only offers the toggle.
       sidebar: { collapsed: () => document.querySelector('[data-sidebar-collapsed]') !== null, toggle: () => { ctx.layout.toggleSidebar() } },
       leave: () => { ctx.layout.selectPanel(null) },
@@ -277,6 +311,14 @@ export function apply(ctx: ClientContext): void {
     label: () => t('about.nav'),
     locale: NS,
   }, AboutSection)), 'agent-bridge: settings tab')
+  ctx.effect(() => slots.inject('settings.section', () => slots.register({
+    name: 'settings.section',
+    id: 'agent-bridge-models',
+    order: 31,
+    label: () => t('models.nav'),
+    locale: NS,
+    inject: () => ({ getDefaultCwd: () => defaultCwd, codexEnabled: () => codexEnabled }),
+  }, ModelsSection)), 'agent-bridge: models settings tab')
   // dsh 0.2.2 resolves the row menu from the context-menu registry; external rows open the plugin's own target family there.
   ctx.inject(['contextMenus'] as never, (menuCtx: ClientContext) => {
     const menus = (menuCtx as unknown as { contextMenus: ContextMenus }).contextMenus
@@ -306,6 +348,65 @@ export function apply(ctx: ClientContext): void {
       return [{ id: 'rename', label: t('menu.rename'), icon: { key: 'workspace.rename' }, run: () => { request(value.sessionId, String(value.displayTitle ?? '')) } }]
     })
     action('archive', 600, (_value, raw) => [{ id: 'archive', label: t('menu.archive'), icon: { key: 'workspace.archive' }, separatorBefore: true, run: () => { archiveRow(raw) } }])
+  })
+  const engines = createEngineStore()
+  const startChat = (engine: EngineName, text: string, cwd: string, extras: SendExtras): void => {
+    pendingCwd = cwd
+    open(engine === 'codex' ? NEW_CODEX_SESSION_ID : NEW_SESSION_ID)
+    void transcript.send(text, cwd, extras)
+  }
+  // The native seat's directory resolves through the caller's context, so remote.session must be injected here as well.
+  ctx.inject(['sessions', 'modelDirectories', 'remote', 'remote.session'] as never, (seatCtx: ClientContext) => {
+    const { modelDirectories, sessions } = seatCtx as unknown as SeatContext
+    const known = new Map<string, SeatServices>()
+    const servicesFor = (sessionId: string): { services: SeatServices } => {
+      const existing = known.get(sessionId)
+      if (existing !== undefined) return { services: existing }
+      let directory: ReturnType<SeatContext['modelDirectories']['directoryFor']> | undefined
+      try {
+        directory = modelDirectories.directoryFor(sessionId)
+      } catch (error) {
+        console.warn('agent-bridge: model directory is not ready', error)
+      }
+      const services: SeatServices = {
+        ...directory === undefined ? {} : { catalog: directory.store },
+        loadCatalog: () => { directory?.load().catch((error: unknown) => { console.warn('agent-bridge: model catalog failed', error) }) },
+        selectModel: (selection) => { directory?.select(selection).catch((error: unknown) => { console.warn('agent-bridge: model selection failed', error) }) },
+        engines, startChat,
+        getCwd: () => sessions.list.getSnapshot().byId[sessionId]?.cwd ?? defaultCwd,
+        subscribeSessions: listener => sessions.list.subscribe(listener),
+        isBlank: () => sessions.list.getSnapshot().byId[sessionId]?.blank === true,
+        codexEnabled: () => codexEnabled,
+      }
+      if (directory !== undefined) known.set(sessionId, services)
+      return { services }
+    }
+    const seatSlots = slots as unknown as SeatSlots
+    seatCtx.effect(() => seatSlots.inject('conversation.input.model', () => seatSlots.register({
+      name: 'conversation.input.model', priority: -1, locale: NS, inject: servicesFor,
+    }, ProviderSeat)), 'agent-bridge: model seat')
+    // A chain selector may read only its owner props, so the provider decides whether the entry is registered at all.
+    seatCtx.effect(() => {
+      let remove: (() => void) | undefined
+      const sync = (): void => {
+        const active = engines.getSnapshot() !== 'dsh'
+        if (active && remove === undefined) {
+          remove = seatSlots.inject('conversation.composer', () => seatSlots.register({
+            name: 'conversation.composer', priority: 10, locale: NS, inject: servicesFor,
+            select: (owner: { session?: { blank: boolean } | undefined }) => owner.session?.blank === true ? {} : null,
+          }, NewChatComposer))
+        } else if (!active && remove !== undefined) {
+          remove()
+          remove = undefined
+        }
+      }
+      sync()
+      const unsubscribe = engines.subscribe(sync)
+      return () => {
+        unsubscribe()
+        remove?.()
+      }
+    }, 'agent-bridge: new-chat composer')
   })
   ctx.effect(() => () => { transcript.close() }, 'agent-bridge: transcript teardown')
   // Re-list when the row limit changes and when the tab becomes visible again (sessions created in a terminal).

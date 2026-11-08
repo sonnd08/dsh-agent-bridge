@@ -815,3 +815,20 @@
 .permissionChevronOpen {
   transform: rotate(180deg);
 }
+
+.switchDivider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  list-style: none;
+}
+
+.switchDivider::before,
+.switchDivider::after {
+  flex: 1;
+  height: 1px;
+  background: var(--dsw-alias-border-l2);
+  content: '';
+}

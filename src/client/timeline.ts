@@ -1,5 +1,5 @@
 /** Turns transcript messages into the items the panel draws: tool calls merged with their results. */
-import type { BlockWire, MessageWire, TodoWire } from '../protocol.ts'
+import type { BlockWire, EngineName, MessageWire, TodoWire } from '../protocol.ts'
 
 type ToolUse = Extract<BlockWire, { type: 'tool_use' }>
 type ToolResult = Extract<BlockWire, { type: 'tool_result' }>
@@ -16,6 +16,8 @@ export interface TimelineMessage {
   readonly id: string
   readonly role: 'user' | 'assistant'
   readonly items: readonly TimelineItem[]
+  /** Set when the conversation moved to this provider at this message. */
+  readonly switchedTo?: EngineName | undefined
 }
 
 /**
@@ -58,7 +60,7 @@ export function buildTimeline(messages: readonly MessageWire[]): TimelineMessage
           break
       }
     }
-    if (items.length > 0) timeline.push({ id: message.id, role: message.role, items })
+    if (items.length > 0) timeline.push({ id: message.id, role: message.role, items, ...message.switchedTo === undefined ? {} : { switchedTo: message.switchedTo } })
   }
   return timeline
 }

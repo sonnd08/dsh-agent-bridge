@@ -35,3 +35,8 @@ test('todo calls become a checklist item', () => {
   const [message] = buildTimeline([{ id: 'a1', role: 'assistant', blocks: [{ ...use('t1', 'TodoWrite'), todos }] }])
   assert.equal(message.items[0].kind, 'todos')
 })
+
+test('a provider switch stays on its drawn message', () => {
+  const timeline = buildTimeline([{ id: '1', role: 'user', blocks: [{ type: 'text', text: 'hello' }], switchedTo: 'codex' }])
+  assert.equal(timeline[0].switchedTo, 'codex')
+})

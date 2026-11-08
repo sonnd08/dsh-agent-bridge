@@ -27,13 +27,15 @@ import { readAbout } from './about.ts'
 import { claudePermission, codexPermission, parsePreset } from './permissions.ts'
 import { startHeapWatch } from './diagnostics.ts'
 import { createSingleFlight } from './single-flight.ts'
+import { parseModelPrefs } from './model-prefs.ts'
+import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, isCommand, linkOf, mergeLinkedMessages, planSwitch, recordSwitch, removeThread, withoutCatchup, type ThreadLink } from './links.ts'
 import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig } from './extras.ts'
 import {
   browseDirs, fsAction, gitClone, gitWorktreeAction, gitWorktrees, readImage,
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, MODEL_PREFS_PATH, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -357,7 +359,8 @@ export function apply(ctx: Context, config: Config): void {
     const wantArchived = query(request, 'archived') === '1'
     const piRows = settings.piEnabled ? await listPiRows(settings.sessionLimit) : []
     const all = [...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows]
-    const rows = all.filter(row => archived.has(row.id) === wantArchived).sort((a, b) => b.updatedAt - a.updatedAt)
+    const hidden = hiddenThreadIds(store.get('links'))
+    const rows = all.filter(row => archived.has(row.id) === wantArchived && !hidden.has(row.id)).map(row => ({ ...row, title: cleanTitle(row.title) })).sort((a, b) => b.updatedAt - a.updatedAt)
     const running = rows.filter((row) => {
       const parsed = parseId(row.id)
       return parsed !== undefined && driverOf(parsed.engine).isRunning(parsed.raw)
@@ -367,6 +370,21 @@ export function apply(ctx: Context, config: Config): void {
   }, 'sessions')
   // A transcript can be tens of megabytes; requests that arrive while it is being read share that read.
   const sessionReads = createSingleFlight<SessionWire>()
+  /** Transcripts of a linked conversation; a thread that cannot be read must not hide the open one. */
+  const linkedThreads = async (link: ThreadLink, openId: string, openMessages: readonly MessageWire[]): Promise<Record<string, readonly MessageWire[]>> => {
+    const others = Object.values(link.threads).filter((id): id is string => id !== undefined && id !== openId)
+    const read = await Promise.all(others.map(async (id): Promise<[string, readonly MessageWire[]]> => {
+      const other = parseId(id)
+      if (other === undefined) return [id, []]
+      try {
+        return [id, (await driverOf(other.engine).readMessages(other.raw)).messages]
+      } catch (error) {
+        console.warn('agent-bridge: linked thread could not be read', id, error)
+        return [id, []]
+      }
+    }))
+    return { ...Object.fromEntries(read), [openId]: openMessages }
+  }
   route(SESSION_PATH, async (request) => {
     const parsed = idOf(request)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
@@ -375,7 +393,10 @@ export function apply(ctx: Context, config: Config): void {
       const goal = await driver.readGoal(parsed.raw)
       const usage = parsed.engine === 'claude' ? await readClaudeUsage(parsed.raw) : parsed.engine === 'pi' ? await readPiUsage(parsed.raw) : undefined
       const page = await driver.readMessages(parsed.raw)
-      return { messages: page.messages, ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
+      const sessionId = prefixed(parsed.engine, parsed.raw)
+      const link = linkOf(store.get('links'), sessionId)
+      const messages = link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages))
+      return { messages: withoutCatchup(messages), ...page.recentTurns === undefined ? {} : { recentTurns: page.recentTurns }, ...goal === undefined ? {} : { goal }, ...usage === undefined ? {} : { usage } }
     }))
   }, 'session')
   route(WATCH_PATH, (request, settings) => watchResponse(request, settings.watchIntervalMs, driverOf), 'watch')
@@ -427,7 +448,34 @@ export function apply(ctx: Context, config: Config): void {
     clearDraft()
     return { id: prefixed('claude', id) }
   }
-  route(SEND_PATH, async (request, settings) => json(await sendMessage(await request.json() as SendBodyWire, settings)), 'send', 'POST')
+  // One switch per source thread at a time: a second one would create a second thread for the other provider.
+  const switching = new Set<string>()
+  const sendSwitched = async (body: SendBodyWire, sourceId: string, settings: Settings): Promise<{ id: string }> => {
+    const source = parseId(sourceId)
+    const target = body.engine
+    if (source === undefined || target === undefined || body.cwd === undefined || body.cwd === '') throw new HttpError(400, 'a switch needs a source session, an engine and a working directory')
+    if (switching.has(sourceId) || driverOf(source.engine).isRunning(source.raw)) throw new HttpError(409, 'a turn is running in this session')
+    switching.add(sourceId)
+    try {
+      const { messages } = await driverOf(source.engine).readMessages(source.raw)
+      let plan
+      try {
+        plan = planSwitch(store.get('links'), sourceId, target, messages)
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error))
+      }
+      const sent = await sendMessage({ ...body, ...plan.targetId === undefined ? {} : { id: plan.targetId }, text: composeSwitchPrompt(body.text, plan.catchup) }, settings)
+      // A slash command carries no catch-up, so the next message still has to.
+      store.set('links', recordSwitch(store.get('links'), sourceId, sent.id, isCommand(body.text) ? undefined : plan.deliveredThrough, plan.deliveredThrough))
+      return sent
+    } finally {
+      switching.delete(sourceId)
+    }
+  }
+  route(SEND_PATH, async (request, settings) => {
+    const body = await request.json() as SendBodyWire
+    return json(await (body.switchFrom === undefined ? sendMessage(body, settings) : sendSwitched(body, body.switchFrom, settings)))
+  }, 'send', 'POST')
   const scheduler = new Scheduler(
     store,
     async (message) => {
@@ -468,6 +516,7 @@ export function apply(ctx: Context, config: Config): void {
         return json({ ok: true })
       case 'delete':
         await driver.delete(parsed.raw)
+        store.set('links', removeThread(store.get('links'), body.id))
         return json({ ok: true })
     }
   }, 'manage', 'POST')
@@ -597,6 +646,13 @@ export function apply(ctx: Context, config: Config): void {
     store.set('drafts', drafts)
     return json({ ok: true })
   }, 'draft', 'BOTH')
+  route(MODEL_PREFS_PATH, async (request) => {
+    if (request.method === 'GET') return json(store.get('modelPrefs'))
+    const prefs = parseModelPrefs(await request.json())
+    if (prefs === undefined) return json({ error: 'invalid model preferences' }, 400)
+    store.set('modelPrefs', prefs)
+    return json({ ok: true })
+  }, 'model preferences', 'BOTH')
   route(CHOICE_PATH, async (request) => {
     if (request.method === 'GET') return json(store.get('choices')[query(request, 'engine')] ?? { model: '', effort: '' })
     const body = await request.json() as { engine: unknown } & Record<keyof ChoiceWire, unknown>

@@ -13,6 +13,9 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 - **Continue any session.** Opening a row shows the full transcript. You can send messages, stop a turn, answer permission prompts and questions, pick the model and reasoning effort, and attach images. Claude runs through the Claude Agent SDK and Codex through `codex app-server`, so the sessions stay compatible with the CLIs.
 - **Same controls as DSH.** Enter sends and Shift+Enter starts a new line. A running session shows DSH's own spinner in its row, and a "Working for N s" line stays under your message until the turn ends. For Claude and Codex, the permission menu beside the attach button chooses Default (ask each time), Read Only, Workspace Write or Full Access; Full Access needs confirming first, the choice is kept per engine, and scheduled messages always use Default. Claude's thinking summaries appear above its replies once each thinking block completes.
 - **Start new sessions** in any folder, or clone a repository first.
+- **Provider selector.** The model button shows a provider rail, a model search and a reasoning column. On a new chat, select Claude or Codex to start that provider's session from the DSH composer.
+- **Model management.** Settings → Agent models reorders models, hides the ones you do not use, marks favorites, and adds custom model IDs for Claude and Codex.
+- **Switch provider in a conversation.** Select the other provider in an open Claude or Codex session. The next message goes to that provider's thread, with the user and assistant text it has not seen. Tool calls and tool results are not passed on. The two threads show as one row.
 - **Search the contents of every session.**
 - **Workbench tabs** next to each conversation:
   - Terminal.

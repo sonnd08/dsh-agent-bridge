@@ -1,0 +1,222 @@
+.page {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+
+.title {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.engines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border-right: 1px solid var(--dsw-alias-border-l2);
+}
+
+.engine,
+.engineActive {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.engine:hover,
+.engineActive {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.content {
+  min-width: 0;
+  padding: 14px;
+}
+
+.hint {
+  margin: 0 0 10px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.tools,
+.addRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.filter {
+  box-sizing: border-box;
+  min-width: 180px;
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.action {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.action:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.count {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.error {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.group {
+  margin: 14px 0 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row,
+.rowHidden {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.rowHidden .name,
+.rowHidden .slug {
+  opacity: 0.45;
+}
+
+.name {
+  white-space: nowrap;
+}
+
+.slug {
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.star,
+.starOn,
+.arrow,
+.remove {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.starOn {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* As wide as the switch of a listed model, so that the arrows of all rows align. */
+.remove {
+  width: 36px;
+}
+
+.arrow:hover:not(:disabled),
+.remove:hover,
+.star:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.switchOn,
+.switchOff {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: none;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.switchOn {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.switchOff {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.switchOn span,
+.switchOff span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-base);
+}
+
+.switchOff span {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.switchOn span {
+  left: 19px;
+}

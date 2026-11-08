@@ -113,6 +113,8 @@ export interface MessageWire {
   readonly id: string
   readonly role: 'user' | 'assistant'
   readonly blocks: readonly BlockWire[]
+  /** On the first message after a provider switch in a linked conversation: the new provider. */
+  readonly switchedTo?: EngineName
 }
 
 /** Active /goal of a session. */
@@ -181,6 +183,8 @@ export interface SendBodyWire {
   readonly id?: string
   readonly cwd?: string
   readonly text: string
+  /** Session the user is leaving: the message goes to `engine`'s thread of this conversation, with a catch-up. Needs `engine` and `cwd`. */
+  readonly switchFrom?: string
   /** Model and reasoning effort for this turn; empty uses the engine default. */
   readonly model?: string
   readonly effort?: string
@@ -291,6 +295,14 @@ export interface FsImageWire { readonly mime: string; readonly base64: string }
 export interface FsBrowseWire { readonly path: string; readonly parent: string | undefined; readonly dirs: readonly string[] }
 
 export const INFO_PATH = '/api/agent-bridge/info'
+/** GET and POST: the user's model order, hidden models, favorites and custom models. */
+export const MODEL_PREFS_PATH = '/api/agent-bridge/model-prefs'
+/** Providers whose model list the user can change. */
+export type PrefsEngine = 'claude' | 'codex'
+/** One provider's model list settings. */
+export interface EngineModelPrefsWire { readonly hidden: readonly string[]; readonly order: readonly string[]; readonly custom: readonly string[] }
+/** Body of the model preferences route; `favorites` holds `engine/model` keys. */
+export interface ModelPrefsWire { readonly engines: Partial<Record<PrefsEngine, EngineModelPrefsWire>>; readonly favorites: readonly string[] }
 /** GET: plugin, dsh and engine versions for the settings tab. */
 export const ABOUT_PATH = '/api/agent-bridge/about'
 export const SEARCH_PATH = '/api/agent-bridge/search'

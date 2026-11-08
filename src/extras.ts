@@ -11,7 +11,9 @@ import { homedir, tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { claudeConfigDir } from './claude.ts'
-import type { AttachmentWire, ChoiceWire, McpBodyWire, SkillBodyWire, SkillWire } from './protocol.ts'
+import type { ThreadLink } from './links.ts'
+import { NO_MODEL_PREFS } from './model-prefs.ts'
+import type { AttachmentWire, ChoiceWire, McpBodyWire, ModelPrefsWire, SkillBodyWire, SkillWire } from './protocol.ts'
 import { HttpError } from './workbench.ts'
 
 const exec = promisify(execFile)
@@ -25,6 +27,10 @@ export interface PersistedState {
   /** Sessions pinned in the Workspace browser, as prefixed session ids. */
   pinned: string[]
   scheduled: ScheduledMessage[]
+  /** Claude and Codex threads that continue one conversation. */
+  links: ThreadLink[]
+  /** The user's model order, hidden models, favorites and custom models. */
+  modelPrefs: ModelPrefsWire
 }
 
 /** A message waiting to be sent to a session at a time. */
@@ -57,7 +63,7 @@ export function defaultStatePath(plugin: 'agent-bridge' | 'external-engines' = '
 export class StateStore {
   private state: PersistedState
   constructor(private readonly path: string, legacyPath?: string) {
-    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [] }
+    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [], links: [], modelPrefs: NO_MODEL_PREFS }
     const source = legacyPath !== undefined && !existsSync(path) ? legacyPath : path
     try {
       this.state = { ...this.state, ...JSON.parse(readFileSync(source, 'utf8')) as Partial<PersistedState> }
