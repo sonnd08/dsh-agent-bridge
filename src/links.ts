@@ -91,14 +91,19 @@ function neutralize(text: string): string {
 
 /**
  * Build the catch-up block for the messages the other provider has not seen.
- * @param from - provider the history comes from.
+ * @param from - provider the history starts with; a message with `switchedTo` changes the speaker from there on.
  * @param messages - messages to pass on, oldest first.
  * @param gap - whether messages between the last catch-up and these could not be read.
  * @param limits - size limits; the newest messages are kept.
  * @returns the block, or empty when there is nothing to pass on.
  */
 export function renderCatchup(from: EngineName, messages: readonly MessageWire[], gap: boolean, limits: CatchupLimits = DEFAULT_LIMITS): string {
-  const label = LABELS[from] ?? from
+  const nameOf = (engine: EngineName): string => LABELS[engine] ?? engine
+  let label = nameOf(from)
+  const speakers = messages.map((message) => {
+    if (message.switchedTo !== undefined) label = nameOf(message.switchedTo)
+    return label
+  })
   const entries: string[] = []
   let used = 0
   let omitted = false
@@ -107,7 +112,7 @@ export function renderCatchup(from: EngineName, messages: readonly MessageWire[]
     const text = spokenText(message)
     if (text === '') continue
     const clipped = text.length > limits.perMessage ? `${text.slice(0, limits.perMessage)}\n[message shortened]` : text
-    const entry = `${message.role === 'user' ? 'User' : label}: ${neutralize(clipped)}`
+    const entry = `${message.role === 'user' ? 'User' : speakers[index] as string}: ${neutralize(clipped)}`
     if (used + entry.length > limits.total) {
       omitted = true
       break
@@ -126,6 +131,15 @@ export function renderCatchup(from: EngineName, messages: readonly MessageWire[]
     ...entries,
     CLOSE,
   ].join('\n')
+}
+
+/**
+ * Catch-up block for a transcript that shows it to the user, where the tags would be noise.
+ * @param block - block from {@link renderCatchup}, or empty.
+ * @returns the block with a separator in place of its tags, or empty.
+ */
+export function readableCatchup(block: string): string {
+  return block === '' ? '' : `---\n${block.slice(OPEN.length + 1, -(CLOSE.length + 1))}`
 }
 
 /**

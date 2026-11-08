@@ -19,7 +19,9 @@ import { currentModelPrefs } from './model-prefs-store.ts'
 import { currentProviders } from './providers-store.ts'
 import { loadInfo } from './info.ts'
 import { engineLabels } from './model-names.ts'
-import { ARCHIVE_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, draftIdFor, CHOICE_PATH, type ChoiceWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
+import type { DshSwitchRequest } from './ExternalPanel.tsx'
+import { composeSwitchPrompt } from '../links.ts'
+import { ARCHIVE_PATH, CATCHUP_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, draftIdFor, engineOfSession, CHOICE_PATH, type ChoiceWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
 import { applyEngineMarks } from './branding.tsx'
 import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
@@ -59,8 +61,18 @@ interface SeatContext {
       getSnapshot(): { readonly byId: Readonly<Record<string, { readonly cwd?: string; readonly blank?: boolean } | undefined>> }
       subscribe(listener: () => void): () => void
     }
+    create(options: { readonly cwd: string }): Promise<string>
+  }
+  readonly remote: {
+    readonly session: {
+      selectModel(selection: { readonly sessionId: string; readonly provider: string; readonly model: string; readonly reasoningEffort?: string }): Promise<RemoteOutcome>
+      prompt(request: { readonly requestId: string; readonly sessionId: string; readonly mode: 'queue'; readonly content: readonly { readonly type: 'text'; readonly text: string }[]; readonly clientTimeZone: string }): Promise<RemoteOutcome>
+    }
   }
 }
+
+/** Result of a harness Remote call. */
+type RemoteOutcome = { readonly ok: true } | { readonly ok: false; readonly error: { readonly message: string } }
 
 /** The conversation slots the provider selector registers in; their types belong to the harness conversation package. */
 interface SeatSlots {
@@ -202,6 +214,12 @@ export function apply(ctx: ClientContext): void {
       else console.warn('agent-bridge: archive failed', response.status)
     })
   }
+  const forkRow = (id: string, title: string): void => {
+    void transcript.fork(id, `${title} (fork)`, rows.find(row => row.id === id)?.cwd ?? '').then((forked) => {
+      if (forked === undefined) console.warn('agent-bridge: fork failed', id)
+      else ctx.layout.selectPanel(PANEL_ID as MainPanelId)
+    })
+  }
   const renameRow = async (id: string, title: string): Promise<void> => {
     const response = await postJson(MANAGE_PATH, { id, action: 'rename', title } satisfies ManageBodyWire)
     if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`)
@@ -309,12 +327,13 @@ export function apply(ctx: ClientContext): void {
     const current = scope.getSnapshot().value?.allowedTools ?? []
     if (!current.includes(tool)) await scope.set('allowedTools', [...current, tool])
   }
+  let startDshSession: ((request: DshSwitchRequest) => Promise<string | undefined>) | undefined
   ctx.effect(() => slots.inject('main', () => slots.register({
     name: 'main',
     key: PANEL_ID,
     locale: NS,
     inject: () => ({
-      hooks: { selection: store, transcript }, controller: transcript, getDefaultCwd: () => defaultCwd, codexEnabled: () => codexEnabled, openSettings: canOpenSettings() ? openSettings : undefined, alwaysAllow, clearSelection, openSession: open, takePendingCwd,
+      hooks: { selection: store, transcript }, controller: transcript, startDshSession: async (request: DshSwitchRequest) => startDshSession === undefined ? 'DeepSeek Harness is not ready' : await startDshSession(request), getDefaultCwd: () => defaultCwd, codexEnabled: () => codexEnabled, openSettings: canOpenSettings() ? openSettings : undefined, alwaysAllow, clearSelection, openSession: open, takePendingCwd,
       // The frame marks a collapsed sidebar column on its root; ctx.layout only offers the toggle.
       sidebar: { collapsed: () => document.querySelector('[data-sidebar-collapsed]') !== null, toggle: () => { ctx.layout.toggleSidebar() } },
       leave: () => { ctx.layout.selectPanel(null) },
@@ -363,6 +382,7 @@ export function apply(ctx: ClientContext): void {
       if (request === undefined) return []
       return [{ id: 'rename', label: t('menu.rename'), icon: { key: 'workspace.rename' }, run: () => { request(value.sessionId, String(value.displayTitle ?? '')) } }]
     })
+    action('fork', 300, (value, raw) => engineOfSession(raw) === 'pi' && running.has(raw) ? [] : [{ id: 'fork', label: t('menu.fork'), icon: { key: 'workspace.fork' }, run: () => { forkRow(raw, String(value.displayTitle ?? '')) } }])
     action('archive', 600, (_value, raw) => [{ id: 'archive', label: t('menu.archive'), icon: { key: 'workspace.archive' }, separatorBefore: true, run: () => { archiveRow(raw) } }])
   })
   const engines = createEngineStore()
@@ -403,6 +423,28 @@ export function apply(ctx: ClientContext): void {
       if (directory !== undefined) known.set(sessionId, services)
       return { services }
     }
+    seatCtx.effect(() => {
+      const { remote } = seatCtx as unknown as SeatContext
+      // DSH has no history import, so the first message of the new session carries the conversation as text.
+      startDshSession = async ({ fromId, text, cwd, modelId, effort }) => {
+        try {
+          const response = await fetch(`${CATCHUP_PATH}?${new URLSearchParams({ id: fromId }).toString()}`, { credentials: 'same-origin' })
+          if (!response.ok) return ((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`
+          const { catchup } = await response.json() as { catchup: string }
+          const sessionId = await sessions.create({ cwd })
+          const provider = modelId.slice(0, modelId.indexOf('/'))
+          const selected = await remote.session.selectModel({ sessionId, provider, model: modelId.slice(provider.length + 1), ...effort === '' ? {} : { reasoningEffort: effort } })
+          if (!selected.ok) return selected.error.message
+          const sent = await remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: composeSwitchPrompt(text, catchup) }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+          if (!sent.ok) return sent.error.message
+          ;(ctx.uiWorkspace as unknown as { openSession(id: string): void }).openSession(sessionId)
+          return undefined
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error)
+        }
+      }
+      return () => { startDshSession = undefined }
+    }, 'agent-bridge: switch to a DSH session')
     const seatSlots = slots as unknown as SeatSlots
     seatCtx.effect(() => seatSlots.inject('conversation.input.model', () => seatSlots.register({
       name: 'conversation.input.model', priority: -1, locale: NS, inject: servicesFor,

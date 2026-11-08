@@ -65,11 +65,24 @@ export interface TranscriptController extends HostObservable<TranscriptState> {
   /** Interrupt the running turn. */
   interrupt(): Promise<void>
   /**
-   * Fork, rename, or delete the open session.
+   * Show an error in the open session.
+   * @param message - the error text.
+   */
+  fail(message: string): void
+  /**
+   * Fork a session with the engine of that session, and open the fork.
+   * @param id - session to fork; it does not have to be the open session.
+   * @param title - title of the fork.
+   * @param cwd - folder of the session.
+   * @returns the id of the fork, or undefined if the fork failed.
+   */
+  fork(id: string, title: string, cwd: string): Promise<string | undefined>
+  /**
+   * Rename or delete the open session.
    * @param action - the operation.
    * @param title - new title for `rename`.
    */
-  manage(action: ManageBodyWire['action'], title?: string): Promise<void>
+  manage(action: Exclude<ManageBodyWire['action'], 'fork'>, title?: string): Promise<void>
 }
 
 /** Per-turn choices that ride along with a message. */
@@ -309,6 +322,20 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
       }
       await post(ANSWER_PATH, body)
     },
+    fail(message) {
+      patch({ error: message })
+    },
+    async fork(id, title, cwd) {
+      const response = await post(MANAGE_PATH, { id, action: 'fork', title, cwd } satisfies ManageBodyWire)
+      if (!response.ok) {
+        patch({ error: ((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}` })
+        return undefined
+      }
+      const { id: forked } = await response.json() as { id: string }
+      hooks.onCreated(forked, cwd, title)
+      load(forked)
+      return forked
+    },
     async manage(action, title) {
       const current = state.sessionId
       if (current === undefined || isDraft(current) || state.running) return
@@ -318,11 +345,7 @@ export function createTranscriptController(hooks: TranscriptHooks): TranscriptCo
         patch({ error: ((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}` })
         return
       }
-      if (action === 'fork') {
-        const { id } = await response.json() as { id: string }
-        hooks.onCreated(id, '', title ?? '')
-        load(id)
-      } else if (action === 'delete') {
+      if (action === 'delete') {
         generation += 1
         closeFeeds()
         publish(IDLE)

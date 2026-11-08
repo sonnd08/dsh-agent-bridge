@@ -28,15 +28,16 @@ import { claudePermission, codexPermission, parsePreset } from './permissions.ts
 import { startHeapWatch } from './diagnostics.ts'
 import { createSingleFlight } from './single-flight.ts'
 import { parseModelPrefs } from './model-prefs.ts'
+import { completedPrefix, forkedLink, mergeUnlistedForks } from './fork.ts'
 import { claudeExtraArgs, expandHome, parseInstance, splitLaunchArgs } from './instances.ts'
-import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, isCommand, linkOf, mergeLinkedMessages, planSwitch, recordSwitch, removeThread, withoutCatchup, type ThreadLink } from './links.ts'
+import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, isCommand, linkOf, mergeLinkedMessages, planSwitch, readableCatchup, recordSwitch, removeThread, renderCatchup, withoutCatchup, type ThreadLink } from './links.ts'
 import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig } from './extras.ts'
 import {
   browseDirs, fsAction, gitClone, gitWorktreeAction, gitWorktrees, readImage,
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, CATCHUP_PATH, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -189,7 +190,7 @@ interface Driver {
   isRunning(id: string): boolean
   interrupt(id: string): Promise<boolean>
   answer(id: string, requestId: string, body: AnswerBodyWire): boolean
-  fork(id: string): Promise<string>
+  fork(id: string, title?: string): Promise<string>
   rename(id: string, title: string): Promise<void>
   delete(id: string): Promise<void>
 }
@@ -316,7 +317,12 @@ export function apply(ctx: Context, config: Config): void {
     answer: (id, requestId, body) => runs.answer(id, requestId, body.behavior === 'allow'
       ? { behavior: 'allow', ...body.answers === undefined ? {} : { answers: body.answers } }
       : { behavior: 'deny' }),
-    fork: id => forkClaudeSession(id, home),
+    fork: async (id, title) => {
+      const prompt = runs.runningPrompt(id)
+      const prefix = prompt === undefined ? {} : completedPrefix(await readClaudeMessages(id, home), prompt)
+      if (prefix === undefined) throw new HttpError(409, 'this session has no completed turn to fork from')
+      return await forkClaudeSession(id, home, { ...title === undefined ? {} : { title }, ...prefix })
+    },
     rename: (id, title) => renameClaudeSession(id, title, home),
     delete: id => deleteClaudeSession(id, home),
   })
@@ -334,7 +340,11 @@ export function apply(ctx: Context, config: Config): void {
     answer: (id, requestId, body) => engine().answer(id, requestId, body.behavior === 'allow'
       ? { behavior: 'allow', ...body.answers === undefined ? {} : { answers: body.answers }, ...body.remember === true ? { remember: true } : {} }
       : { behavior: 'deny' }),
-    fork: id => engine().fork(id),
+    fork: async (id, title) => {
+      const forked = await engine().fork(id)
+      if (title !== undefined) await engine().rename(forked, title)
+      return forked
+    },
     rename: (id, title) => engine().rename(id, title),
     delete: id => engine().delete(id),
   })
@@ -408,7 +418,9 @@ export function apply(ctx: Context, config: Config): void {
         return []
       }
     }))).flat()
-    const all = [...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows, ...instanceRows]
+    const saved = store.get('unlistedForks')
+    const { rows: all, unlisted } = mergeUnlistedForks([...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows, ...instanceRows], saved)
+    if (unlisted.length !== saved.length) store.set('unlistedForks', unlisted)
     const hidden = hiddenThreadIds(store.get('links'))
     const rows = all.filter(row => archived.has(row.id) === wantArchived && !hidden.has(row.id)).map(row => ({ ...row, title: cleanTitle(row.title) })).sort((a, b) => b.updatedAt - a.updatedAt)
     const running = rows.filter((row) => {
@@ -435,6 +447,45 @@ export function apply(ctx: Context, config: Config): void {
     }))
     return { ...Object.fromEntries(read), [openId]: openMessages }
   }
+  const forkThread = async (id: string, title?: string): Promise<string> => {
+    const parsed = parseId(id)
+    if (parsed === undefined) throw new HttpError(404, 'unknown session')
+    return prefixed(parsed.engine, await driverOf(parsed.engine, parsed.instance).fork(parsed.raw, title), parsed.instance)
+  }
+  const readThread = async (id: string): Promise<readonly MessageWire[]> => {
+    const parsed = parseId(id)
+    if (parsed === undefined) throw new HttpError(404, 'unknown session')
+    return (await driverOf(parsed.engine, parsed.instance).readMessages(parsed.raw)).messages
+  }
+  /** Fork one thread with its own engine. A conversation across providers forks every thread, so that the fork keeps the whole transcript and can switch. */
+  const forkConversation = async (id: string, title?: string): Promise<string> => {
+    const link = linkOf(store.get('links'), id)
+    if (link === undefined) return await forkThread(id, title)
+    const sources = await linkedThreads(link, id, await readThread(id))
+    const forks: Record<string, string> = {}
+    try {
+      for (const thread of Object.values(link.threads)) forks[thread] = await forkThread(thread, thread === id ? title : undefined)
+      const copies = Object.fromEntries(await Promise.all(Object.values(forks).map(async (fork): Promise<[string, readonly MessageWire[]]> => [fork, await readThread(fork)])))
+      store.set('links', [...store.get('links'), forkedLink(link, forks, sources, copies)])
+    } catch (error) {
+      await Promise.allSettled(Object.values(forks).map(async (fork) => {
+        const parsed = parseId(fork)
+        if (parsed !== undefined) await driverOf(parsed.engine, parsed.instance).delete(parsed.raw)
+      }))
+      throw error
+    }
+    return forks[id] ?? id
+  }
+  route(CATCHUP_PATH, async (request) => {
+    const parsed = idOf(request)
+    if (parsed === undefined) return json({ error: 'unknown session' }, 404)
+    const page = await driverOf(parsed.engine, parsed.instance).readMessages(parsed.raw)
+    const sessionId = prefixed(parsed.engine, parsed.raw, parsed.instance)
+    const link = linkOf(store.get('links'), sessionId)
+    const messages = link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages))
+    const first = link?.segments?.[0]?.thread
+    return json({ catchup: readableCatchup(renderCatchup(first === undefined ? parsed.engine : parseId(first)?.engine ?? parsed.engine, messages, page.recentTurns !== undefined)) })
+  }, 'catchup')
   route(SESSION_PATH, async (request) => {
     const parsed = idOf(request)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
@@ -561,16 +612,22 @@ export function apply(ctx: Context, config: Config): void {
     const parsed = parseId(body.id)
     if (parsed === undefined) return json({ error: 'unknown session' }, 404)
     const driver = driverOf(parsed.engine, parsed.instance)
-    if (driver.isRunning(parsed.raw)) return json({ error: 'a turn is running in this session' }, 409)
+    // Claude and Codex can fork a running session; Pi cannot.
+    if (driver.isRunning(parsed.raw) && (body.action !== 'fork' || parsed.engine === 'pi')) return json({ error: 'a turn is running in this session' }, 409)
     switch (body.action) {
-      case 'fork':
-        return json({ id: prefixed(parsed.engine, await driver.fork(parsed.raw), parsed.instance) })
+      case 'fork': {
+        const forked = await forkConversation(body.id, body.title)
+        if (parseId(forked)?.engine === 'codex') store.set('unlistedForks', [...store.get('unlistedForks'), { id: forked, title: body.title ?? '', cwd: body.cwd ?? '', updatedAt: Date.now() }])
+        return json({ id: forked })
+      }
       case 'rename':
         await driver.rename(parsed.raw, body.title ?? '')
+        store.set('unlistedForks', store.get('unlistedForks').map(fork => fork.id === body.id ? { ...fork, title: body.title ?? '' } : fork))
         return json({ ok: true })
       case 'delete':
         await driver.delete(parsed.raw)
         store.set('links', removeThread(store.get('links'), body.id))
+        store.set('unlistedForks', store.get('unlistedForks').filter(fork => fork.id !== body.id))
         return json({ ok: true })
     }
   }, 'manage', 'POST')

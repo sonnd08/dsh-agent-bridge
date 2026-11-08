@@ -13,7 +13,7 @@ import { promisify } from 'node:util'
 import { claudeConfigDir } from './claude.ts'
 import type { ThreadLink } from './links.ts'
 import { NO_MODEL_PREFS } from './model-prefs.ts'
-import type { AttachmentWire, ChoiceWire, McpBodyWire, ModelPrefsWire, ProviderInstanceWire, SkillBodyWire, SkillWire } from './protocol.ts'
+import type { AttachmentWire, ChoiceWire, McpBodyWire, ModelPrefsWire, ProviderInstanceWire, SessionRowWire, SkillBodyWire, SkillWire } from './protocol.ts'
 import { HttpError } from './workbench.ts'
 
 const exec = promisify(execFile)
@@ -33,6 +33,8 @@ export interface PersistedState {
   modelPrefs: ModelPrefsWire
   /** Provider instances the user added. */
   instances: ProviderInstanceWire[]
+  /** Forks that the engine does not list yet. */
+  unlistedForks: SessionRowWire[]
 }
 
 /** A message waiting to be sent to a session at a time. */
@@ -65,7 +67,7 @@ export function defaultStatePath(plugin: 'agent-bridge' | 'external-engines' = '
 export class StateStore {
   private state: PersistedState
   constructor(private readonly path: string, legacyPath?: string) {
-    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [], links: [], modelPrefs: NO_MODEL_PREFS, instances: [] }
+    this.state = { drafts: {}, choices: {}, archived: [], pinned: [], scheduled: [], links: [], modelPrefs: NO_MODEL_PREFS, instances: [], unlistedForks: [] }
     const source = legacyPath !== undefined && !existsSync(path) ? legacyPath : path
     try {
       this.state = { ...this.state, ...JSON.parse(readFileSync(source, 'utf8')) as Partial<PersistedState> }

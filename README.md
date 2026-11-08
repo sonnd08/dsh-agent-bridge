@@ -17,6 +17,8 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 - **Model management.** Settings → Agent Bridge reorders models, hides the ones you do not use, marks favorites, and adds custom model IDs for Claude and Codex.
 - **More than one Claude or Codex account.** Settings → Agent Bridge → **+ Add provider** adds an instance with its own home folder (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`), login and sessions. The DeepSeek Harness models are always in the provider list. To sign in to an instance, run the command that its settings page shows. A removal does not delete the home folder.
 - **Switch provider in a conversation.** Select the other provider in an open Claude or Codex session. The next message goes to that provider's thread, with the user and assistant text it has not seen. Tool calls and tool results are not passed on. The two threads show as one row.
+- **Continue on a DeepSeek model.** Select a DeepSeek Harness model in an open Claude or Codex chat. The next message starts a new DSH session with the conversation text as context. The old chat stays in the list, and tool calls and attachments do not move.
+- **Fork a session.** The row menu has **Fork session**. Claude and Codex use their own fork, and DeepSeek Harness sessions use the DSH fork. A fork of a conversation that switched provider keeps the whole transcript.
 - **Search the contents of every session.**
 - **Workbench tabs** next to each conversation:
   - Terminal.

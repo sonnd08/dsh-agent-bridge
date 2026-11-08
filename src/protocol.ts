@@ -269,8 +269,10 @@ export interface AnswerBodyWire {
 export interface ManageBodyWire {
   readonly id: string
   readonly action: 'fork' | 'rename' | 'delete'
-  /** New title for `rename`. */
+  /** New title for `rename`, or the title of the new session for `fork`. */
   readonly title?: string
+  /** Folder of the session, for `fork`. */
+  readonly cwd?: string
 }
 
 /** Authenticated routes of the workbench (terminal, files, git); every request carries the session's `cwd`. */
@@ -381,6 +383,8 @@ export const SEARCH_PATH = '/api/agent-bridge/search'
 export const DRAFT_PATH = '/api/agent-bridge/draft'
 export const CHOICE_PATH = '/api/agent-bridge/choice'
 export const ARCHIVE_PATH = '/api/agent-bridge/archive'
+/** Catch-up text of a conversation, for a provider that the bridge does not run. */
+export const CATCHUP_PATH = '/api/agent-bridge/catchup'
 /** Authenticated POST route pinning or unpinning a session in the Workspace browser (`{id, pinned}`). */
 export const PIN_PATH = '/api/agent-bridge/pin'
 export const SKILLS_PATH = '/api/agent-bridge/skills'

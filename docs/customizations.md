@@ -29,6 +29,22 @@ Copy this template to the top of the **Log** section.
 
 Put the newest entry first.
 
+### 2026-11-09: DeepSeek in the selector of an open chat
+
+- **What:** The selector of an open Claude or Codex chat has the DeepSeek Harness rail, and its models show in Favorites. If you select a DeepSeek model, the next message starts a new DSH session in the same folder with that model. The first message has the user and assistant text of the conversation as readable context. The old chat stays in the list. The switch goes one way, and tool calls, tool results and attachments do not move. Each catch-up line now names the provider that wrote the reply.
+- **Why:** The user wants to continue a Claude or Codex chat on a DeepSeek model. DSH has no public API to import history, so the context goes in the first message.
+- **Files:** `src/index.ts`, `src/links.ts`, `src/protocol.ts`, `src/client/index.ts`, `src/client/ExternalPanel.tsx`, `src/client/transcript.ts`, `src/client/locales.ts`, `tests/fork.test.mjs`.
+- **Upstream merge risk:** Low. The switch uses the DSH client calls `sessions.create`, `remote.session.selectModel`, `remote.session.prompt` and `uiWorkspace.openSession`, which are pre-stable.
+- **Verified:** `fork` and `links` unit tests pass. In the DSH desktop app, a switched Codex and Claude chat moved to `gpt-6.1-sol`, and the model answered from the copied context. A failed call restored the typed message and showed the error.
+
+### 2026-11-09: Fork from the session row
+
+- **What:** The row menu of a Claude or Codex session has **Fork session**. Claude uses the SDK `forkSession` and Codex uses `thread/fork`, and each instance forks in its own home folder. A fork of a conversation that switched provider forks every provider thread and makes a new link, so the fork keeps the merged transcript and can still switch. Claude and Codex can fork a running session: Codex uses its own interrupted snapshot, and Claude stops at the last completed turn. Codex does not list a fork before its first message, so the bridge saves such a fork in `unlistedForks` until Codex lists it. Pi still cannot fork a running session. DeepSeek Harness sessions keep the native DSH fork, which copies the latest completed-turn prefix.
+- **Why:** The sidebar menu had no fork for Claude and Codex sessions.
+- **Files:** `src/fork.ts`, `src/index.ts`, `src/claude.ts`, `src/extras.ts`, `src/protocol.ts`, `src/client/index.ts`, `src/client/transcript.ts`, `src/client/ExternalPanel.tsx`, `src/client/locales.ts`, `tests/fork.test.mjs`.
+- **Upstream merge risk:** Low. The change adds one row menu item and replaces the fork case of the upstream manage route.
+- **Verified:** `fork` unit tests pass. In the DSH desktop app, the **Fork** item of the session menu forked a Claude session, a running Claude session and a conversation that switched from Claude to Codex. The switched fork kept its merged transcript, stayed in the list after a restart and answered from the copied context. The right-click row item was not opened in the test, because the test tools could not open that menu.
+
 ### 2026-11-09: Add provider instances
 
 - **What:** Settings → Agent Bridge has **+ Add provider**. A 3-step dialog (Provider, Identity, Config) adds a Claude or Codex instance with a label, an ID, an accent color, a binary path, a home folder and launch arguments. Each instance has its own login and sessions: Claude uses `CLAUDE_CONFIG_DIR` and Codex uses `CODEX_HOME`. The host makes the home folder when the instance is added, because Codex does not start if `CODEX_HOME` is missing. Each instance has a rail in the selector, its own models, reasoning levels and favorites, a login command and a **Remove this provider** button. A removal does not delete the home folder. The DeepSeek Harness models are a fixed row of the provider list, and that row has no remove button.

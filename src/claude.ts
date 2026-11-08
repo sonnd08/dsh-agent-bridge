@@ -239,12 +239,14 @@ export async function readClaudeGoal(sessionId: string, home?: string): Promise<
 }
 
 /**
- * Fork a session into a new one with the full transcript.
+ * Fork a session into a new one.
  * @param sessionId - source session UUID (no prefix).
+ * @param home - config folder of an instance.
+ * @param options - title of the fork, and the last message to copy; the default copies the full transcript.
  * @returns the new session UUID.
  */
-export async function forkClaudeSession(sessionId: string, home?: string): Promise<string> {
-  return (await withClaudeHome(home, () => forkSession(sessionId))).sessionId
+export async function forkClaudeSession(sessionId: string, home?: string, options: { readonly title?: string; readonly upToMessageId?: string } = {}): Promise<string> {
+  return (await withClaudeHome(home, () => forkSession(sessionId, options))).sessionId
 }
 
 /**

@@ -47,6 +47,8 @@ interface Run {
   readonly query: Query
   readonly pending: Map<string, (decision: Decision) => void>
   interrupted: boolean
+  /** Text of the turn, which finds the turn in the transcript. */
+  readonly prompt: string
 }
 
 /** MCP server name of the screen-control tools this plugin adds. */
@@ -236,7 +238,7 @@ export class RunManager {
     })
     let sessionId = options.sessionId
     const resolvedId = (): string => sessionId ?? ''
-    current = { query: stream, pending: new Map(), interrupted: false }
+    current = { query: stream, pending: new Map(), interrupted: false, prompt: options.text }
     if (sessionId !== undefined) {
       this.runs.set(sessionId, current)
       this.hub.begin(sessionId)
@@ -318,6 +320,14 @@ export class RunManager {
    */
   isRunning(sessionId: string): boolean {
     return this.runs.has(sessionId)
+  }
+
+  /**
+   * @param sessionId - session id.
+   * @returns the text of the running turn, or undefined when no turn is running.
+   */
+  runningPrompt(sessionId: string): string | undefined {
+    return this.runs.get(sessionId)?.prompt
   }
 
   /**
