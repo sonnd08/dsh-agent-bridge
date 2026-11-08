@@ -1,6 +1,6 @@
 /** Display data of an external provider's models, for the provider selector. */
-import { enginePrefs, orderRows } from '../model-prefs.ts'
-import type { ChoiceWire, EngineName, InfoWire, ModelPrefsWire, ModelWire, PrefsEngine } from '../protocol.ts'
+import { DEFAULT_EFFORT, enginePrefs, orderRows } from '../model-prefs.ts'
+import { providerEngine, type ChoiceWire, type EngineName, type InfoWire, type ModelPrefsWire, type ModelWire, type PrefsEngine } from '../protocol.ts'
 
 /** Value of the Claude list entry that only means "use the engine's default". */
 const DEFAULT_VALUE = 'default'
@@ -41,7 +41,8 @@ export function modelTitle(engine: EngineName, model: ModelWire): string {
  * @param info - what the engine offers.
  * @returns the rows.
  */
-export function engineModels(engine: EngineName, info: InfoWire | undefined): EngineModelRow[] {
+export function engineModels(provider: string, info: InfoWire | undefined): EngineModelRow[] {
+  const engine = providerEngine(provider)
   return (info?.models ?? []).filter(model => model.value !== DEFAULT_VALUE).map(model => ({
     id: model.value, name: modelTitle(engine, model), description: model.description,
     efforts: model.efforts.map(id => ({ id, name: effortName(id) })),
@@ -70,8 +71,35 @@ export function engineCatalog(engine: PrefsEngine, info: InfoWire | undefined, p
  * @returns the rows.
  */
 export function visibleEngineModels(engine: PrefsEngine, info: InfoWire | undefined, prefs: ModelPrefsWire): EngineModelRow[] {
-  const { hidden } = enginePrefs(prefs, engine)
-  return engineCatalog(engine, info, prefs).filter(row => row.custom === true || !hidden.includes(row.id))
+  return visibleRows(engine, engineCatalog(engine, info, prefs), prefs)
+}
+
+/**
+ * @param provider - provider id.
+ * @param rows - the provider's rows.
+ * @param prefs - the user's model preferences.
+ * @returns the rows without the hidden ones; a custom model cannot be hidden, only removed.
+ */
+export function visibleRows(provider: PrefsEngine, rows: readonly EngineModelRow[], prefs: ModelPrefsWire): EngineModelRow[] {
+  const { hidden } = enginePrefs(prefs, provider)
+  return rows.filter(row => row.custom === true || !hidden.includes(row.id))
+}
+
+/** @param info - what the engine offers. @param modelId - model value. @returns the speed tier that selects fast mode on that model, if any. */
+export function fastTierOf(info: InfoWire | undefined, modelId: string): string | undefined {
+  return info?.models.find(model => model.value === modelId)?.fastTier
+}
+
+/**
+ * The saved speed after a model change.
+ * @param info - what the engine offers.
+ * @param modelId - the new model.
+ * @param current - the saved speed.
+ * @returns the new model's fast tier if fast mode stays on, else empty; undefined when the user never chose a speed.
+ */
+export function speedFor(info: InfoWire | undefined, modelId: string, current: string | undefined): string | undefined {
+  if (current === undefined) return undefined
+  return current === '' ? '' : fastTierOf(info, modelId) ?? ''
 }
 
 /** @param info - what the engine offers. @returns the listed model the engine uses when none is picked; absent when the engine does not say. */
@@ -85,15 +113,18 @@ function defaultModel(info: InfoWire | undefined): ModelWire | undefined {
  * @param engine - provider of the choice.
  * @param info - what the engine offers.
  * @param choice - the saved model and effort; an empty model, or `default`, leaves the model to the engine.
- * @returns the selected row id, the model caption, and the effort caption.
+ * @returns the selected row id, the model caption, the effort caption, and the level to send (Medium when none is saved and the model supports it).
  */
-export function engineLabels(engine: EngineName, info: InfoWire | undefined, choice: ChoiceWire): { label: string; effort: string; modelId: string } {
+export function engineLabels(provider: string, info: InfoWire | undefined, choice: ChoiceWire): { label: string; effort: string; effortId: string; modelId: string } {
+  const engine: EngineName = providerEngine(provider)
   const value = choice.model === DEFAULT_VALUE ? '' : choice.model
   const fallback = defaultModel(info)
   const model = value === '' ? fallback : info?.models.find(item => item.value === value)
+  const effortId = choice.effort !== '' ? choice.effort : model?.efforts.includes(DEFAULT_EFFORT) === true ? DEFAULT_EFFORT : ''
   return {
     modelId: model?.value ?? value,
     label: model !== undefined ? modelTitle(engine, model) : value !== '' ? value : info?.defaults?.model ?? '',
-    effort: choice.effort !== '' ? effortName(choice.effort) : info?.defaults?.effort !== undefined ? effortName(info.defaults.effort) : '',
+    effort: effortId !== '' ? effortName(effortId) : info?.defaults?.effort !== undefined ? effortName(info.defaults.effort) : '',
+    effortId,
   }
 }

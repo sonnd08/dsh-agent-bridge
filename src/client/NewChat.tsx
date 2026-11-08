@@ -1,20 +1,22 @@
-/** Provider selection in the harness composer: the model seat, and the composer that starts a Claude or Codex chat. */
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { ComposerBar, AttachmentChips, SlashMenu, toAttachments, useChoice } from './ComposerBar.tsx'
-import { DirPicker } from './DirPicker.tsx'
-import { useInfo } from './info.ts'
-import { engineLabels, visibleEngineModels } from './model-names.ts'
+/** Provider selection in the harness composer: the model seat, and the store that says which provider a new chat uses. */
+import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
+import {
+  PermissionIconAutoReviewRegular, PermissionIconFullAccessRegular, PermissionIconReadOnlyRegular, PermissionIconWorkspaceWriteRegular,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import { useChoices } from './ComposerBar.tsx'
+import { useInfos } from './info.ts'
+import { engineLabels, fastTierOf, speedFor, visibleEngineModels, visibleRows, type EngineModelRow } from './model-names.ts'
+import { publishDshCatalog } from './dsh-catalog-store.ts'
+import { useProviders } from './providers-store.ts'
 import { useModelPrefs } from './model-prefs-store.ts'
-import { toggleFavorite } from '../model-prefs.ts'
+import { enginePrefs, isEngineEnabled, orderRows, pickEffort, toggleFavorite } from '../model-prefs.ts'
+import { bridgeAccessOptions, PermissionPicker, PermissionPopover, type PermissionOption } from './PermissionPicker.tsx'
 import { ProviderPicker, type PickerCurrent, type PickerEngine, type PickerGroup } from './ProviderPicker.tsx'
-import type { SendExtras } from './transcript.ts'
 import type { Translate } from './ToolCard.tsx'
-import type { AttachmentWire, EngineName, InfoWire, ModelPrefsWire, PrefsEngine } from '../protocol.ts'
-import css from './ExternalPanel.module.css'
-import pickerCss from './ProviderPicker.module.css'
+import type { InfoWire, ModelPrefsWire, PermissionPreset, PrefsEngine } from '../protocol.ts'
 
-/** Provider a new chat starts with. */
-export type NewChatEngine = 'dsh' | 'claude' | 'codex'
+/** Provider a new chat starts with: `dsh` or a provider id. */
+export type NewChatEngine = string
 
 /** Observable provider of new chats, kept between chats and page loads. */
 export interface EngineStore {
@@ -25,16 +27,12 @@ export interface EngineStore {
 
 const ENGINE_KEY = 'agent-bridge:new-chat-engine'
 
-function isNewChatEngine(value: unknown): value is NewChatEngine {
-  return value === 'dsh' || value === 'claude' || value === 'codex'
-}
-
 /** @returns the store, starting from the provider of the last new chat. */
 export function createEngineStore(): EngineStore {
   let engine: NewChatEngine = 'dsh'
   try {
     const stored = localStorage.getItem(ENGINE_KEY)
-    if (isNewChatEngine(stored)) engine = stored
+    if (stored !== null && stored !== '') engine = stored
   } catch { /* the choice lasts for this page */ }
   const listeners = new Set<() => void>()
   return {
@@ -75,7 +73,19 @@ export interface CatalogStore {
   subscribe(listener: () => void): () => void
 }
 
-/** What the model seat and the new-chat composer get from the plugin entry. */
+/** One harness permission preset. */
+interface NativeOption { readonly value: string; readonly name: string; readonly description?: string }
+
+/** The harness permission presets, as its own composer control reads them. */
+export interface NativePermission {
+  readonly catalog: {
+    getSnapshot(): { readonly value: { readonly options: readonly NativeOption[] } | null }
+    subscribe(listener: () => void): () => void
+  }
+  readonly select: (preset: string) => Promise<boolean>
+}
+
+/** What the model seat gets from the plugin entry. */
 export interface SeatServices {
   readonly catalog?: CatalogStore | undefined
   readonly loadCatalog: () => void
@@ -85,51 +95,112 @@ export interface SeatServices {
   readonly subscribeSessions: (listener: () => void) => () => void
   readonly isBlank: () => boolean
   readonly codexEnabled: () => boolean
-  readonly startChat: (engine: EngineName, text: string, cwd: string, extras: SendExtras) => void
+  /** Calls back when the plugin learns its configuration from the host, after a page load. */
+  readonly subscribeBridge: (listener: () => void) => () => void
+  readonly nativePermission: () => NativePermission | undefined
+  readonly openSettings: (() => void) | undefined
 }
 
 const NO_CATALOG: CatalogState = { current: null, groups: [], status: 'idle', error: null }
 const noSubscribe = (): (() => void) => () => {}
 const noCatalog = (): CatalogState => NO_CATALOG
+const NO_PERMISSION_CATALOG = { value: null }
+const noPermissionCatalog = (): { readonly value: null } => NO_PERMISSION_CATALOG
 
-/** Picker data of one external provider. */
-export function engineGroup(engine: PrefsEngine, label: string, info: InfoWire | undefined, error: string | undefined, prefs: ModelPrefsWire, t: Translate): PickerGroup {
-  return { engine, label, models: visibleEngineModels(engine, info, prefs), status: error ?? (info === undefined ? t('picker.loading') : undefined) }
+/** The harness's own provider order: the account and the official provider come first. */
+function dshProviderOrder(groups: readonly CatalogGroup[]): CatalogGroup[] {
+  const rank = (group: CatalogGroup): number => group.id === 'deepseek-account' ? 0 : group.id === 'deepseek-official' ? 1 : 2
+  return [...groups].sort((left, right) => rank(left) - rank(right))
+}
+const RISKY_NATIVE_PRESETS = ['danger-full-access', 'auto']
+const NATIVE_ICONS: Readonly<Record<string, ReactNode>> = {
+  'read-only': <PermissionIconReadOnlyRegular />,
+  'workspace-write': <PermissionIconWorkspaceWriteRegular />,
+  'danger-full-access': <PermissionIconFullAccessRegular />,
+  auto: <PermissionIconAutoReviewRegular />,
 }
 
-/** Provider groups, selection and pick callback, shared by the model seat and the new-chat composer. */
-function useProviderChoice(services: SeatServices, t: Translate) {
-  const { catalog, loadCatalog, selectModel, engines, getCwd, subscribeSessions, isBlank, codexEnabled } = services
+/** Picker data of one external provider. */
+export function engineGroup(engine: PrefsEngine, label: string, info: InfoWire | undefined, error: string | undefined, prefs: ModelPrefsWire, t: Translate, accent?: string): PickerGroup {
+  return { engine, label, models: visibleEngineModels(engine, info, prefs), status: error ?? (info === undefined ? t('picker.loading') : undefined), ...accent === undefined ? {} : { accent } }
+}
+
+/** @param option - a harness preset. @param t - translate. @returns the name the composer shows for it; the catalog can hold the raw preset id. */
+function nativePresetLabel(option: { readonly value: string; readonly name: string }, t: Translate): string {
+  if (option.value === 'read-only') return t('composer.permissionReadOnly')
+  if (option.value === 'workspace-write') return t('composer.permissionWorkspace')
+  if (option.value === 'danger-full-access') return t('composer.permissionFull')
+  return option.name
+}
+
+/** @param options - the harness presets. @param t - translate. @returns them as access levels; the presets the bridge also has use its descriptions when the catalog has none. */
+function nativeAccessOptions(options: readonly NativeOption[], t: Translate): PermissionOption[] {
+  const known: Readonly<Record<string, string>> = { 'read-only': t('picker.accessReadOnly'), 'workspace-write': t('picker.accessWorkspace'), 'danger-full-access': t('picker.accessFull') }
+  return options.map((option) => {
+    const description = option.description ?? known[option.value]
+    return { value: option.value, label: nativePresetLabel(option, t), ...description === undefined ? {} : { description }, ...NATIVE_ICONS[option.value] === undefined ? {} : { icon: NATIVE_ICONS[option.value] } }
+  })
+}
+
+/** The harness permission control, for the selector footer. */
+function NativeAccess({ native, useProjection, t }: { native: NativePermission; useProjection: (name: 'permissions') => { readonly currentValue: string } | undefined; t: Translate }) {
+  const selection = useProjection('permissions')
+  const catalog = useSyncExternalStore(native.catalog.subscribe, native.catalog.getSnapshot).value
+  if (selection === undefined || catalog === null) return null
+  return (
+    <PermissionPicker
+      value={selection.currentValue} riskValues={RISKY_NATIVE_PRESETS} t={t}
+      options={nativeAccessOptions(catalog.options, t)}
+      onChange={(preset) => { void native.select(preset).catch((error: unknown) => { console.warn('agent-bridge: permission change failed', error) }) }}
+    />
+  )
+}
+
+/**
+ * Replaces the harness model seat; the rest of the harness composer stays as it is.
+ * @param props - the seat's lock state, plugin services, the session projection hook and locale seat.
+ * @returns the picker.
+ */
+export function ProviderSeat({ locked, services, useProjection, t }: { locked?: boolean; services: SeatServices; useProjection: (name: 'permissions') => { readonly currentValue: string } | undefined; t: Translate }) {
+  const { catalog, loadCatalog, selectModel, engines, getCwd, subscribeSessions, isBlank, codexEnabled, subscribeBridge, nativePermission } = services
   const state = useSyncExternalStore(catalog?.subscribe ?? noSubscribe, catalog?.getSnapshot ?? noCatalog)
-  const selected = useSyncExternalStore(engines.subscribe, engines.getSnapshot)
+  const stored = useSyncExternalStore(engines.subscribe, engines.getSnapshot)
   const blank = useSyncExternalStore(subscribeSessions, isBlank)
   useEffect(() => { loadCatalog() }, [loadCatalog])
   const cwd = getCwd()
-  const claude = useInfo('claude', blank ? cwd : undefined)
-  const codex = useInfo('codex', blank && codexEnabled() ? cwd : undefined)
-  const [claudeChoice, setClaudeChoice] = useChoice('claude')
-  const [codexChoice, setCodexChoice] = useChoice('codex')
+  const codexAvailable = useSyncExternalStore(subscribeBridge, codexEnabled)
   const [prefs, savePrefs] = useModelPrefs()
+  const { providers } = useProviders()
+  const offered = providers.filter(provider => (provider.engine !== 'codex' || codexAvailable) && isEngineEnabled(prefs, provider.id))
+  const offeredIds = offered.map(provider => provider.id)
+  const infos = useInfos(blank ? offeredIds : [], cwd)
+  const choices = useChoices(offeredIds)
+  const selected = stored !== 'dsh' && !offeredIds.includes(stored) ? 'dsh' : stored
 
-  const dshGroup = useMemo((): PickerGroup => ({
+  const dshRows = useMemo((): EngineModelRow[] => dshProviderOrder(state.groups).flatMap(group => group.models.map(model => ({
+    id: `${group.id}/${model.id}`, name: model.name, description: group.name, efforts: model.reasoning?.efforts ?? [],
+  }))), [state.groups])
+  useEffect(() => { if (dshRows.length > 0) publishDshCatalog(dshRows) }, [dshRows])
+  const dshGroup: PickerGroup = {
     engine: 'dsh',
     label: t('picker.dsh'),
-    models: state.groups.flatMap(group => group.models.map(model => ({
-      id: `${group.id}/${model.id}`, name: model.name, description: group.name, efforts: model.reasoning?.efforts ?? [],
-    }))),
+    models: visibleRows('dsh', orderRows(dshRows, enginePrefs(prefs, 'dsh').order), prefs),
     status: state.error ?? (state.status === 'loading' ? t('picker.loading') : undefined),
-  }), [state, t])
+  }
   const groups: readonly PickerGroup[] = blank
-    ? [dshGroup, ...codexEnabled() ? [engineGroup('codex', 'Codex', codex.info, codex.error, prefs, t)] : [], engineGroup('claude', 'Claude Code', claude.info, claude.error, prefs, t)]
+    ? [dshGroup, ...offered.map(provider => engineGroup(provider.id, provider.label, infos[provider.id]?.info, infos[provider.id]?.error, prefs, t, provider.accent))]
     : [dshGroup]
 
   const engine: PickerEngine = blank ? selected : 'dsh'
+  const external = engine !== 'dsh'
+  const externalInfo = infos[engine]?.info
+  const [externalChoice, setExternalChoice] = choices[engine] ?? [{ model: '', effort: '' }, () => {}]
   let current: PickerCurrent
   let label: string
   let effortLabel: string
-  if (engine === 'claude' || engine === 'codex') {
-    const labels = engineLabels(engine, engine === 'claude' ? claude.info : codex.info, engine === 'claude' ? claudeChoice : codexChoice)
-    current = { engine, modelId: labels.modelId, effort: engine === 'claude' ? claudeChoice.effort : codexChoice.effort }
+  if (external) {
+    const labels = engineLabels(engine, externalInfo, externalChoice)
+    current = { engine, modelId: labels.modelId, effort: labels.effortId }
     label = labels.label
     effortLabel = labels.effort
   } else {
@@ -140,97 +211,47 @@ function useProviderChoice(services: SeatServices, t: Translate) {
     effortLabel = model?.reasoning?.efforts.find(level => level.id === effort)?.name ?? ''
   }
 
-  const pick = useCallback((target: PickerEngine, modelId: string, effort: string | undefined): void => {
-    if (target === 'claude' || target === 'codex') {
-      const choice = target === 'claude' ? claudeChoice : codexChoice
-      const set = target === 'claude' ? setClaudeChoice : setCodexChoice
-      set({ ...choice, model: modelId, effort: effort ?? '' })
+  const pick = (target: PickerEngine, modelId: string, explicit: string | undefined): void => {
+    const supported = groups.find(group => group.engine === target)?.models.find(model => model.id === modelId)?.efforts.map(level => level.id) ?? []
+    const { effort, prefs: nextPrefs } = pickEffort(prefs, { key: `${current.engine}/${current.modelId}`, effort: current.effort }, { key: `${target}/${modelId}`, efforts: supported }, explicit)
+    if (nextPrefs !== prefs) savePrefs(nextPrefs)
+    if (target !== 'dsh') {
+      const entry = choices[target]
+      if (entry === undefined) return
+      const [choice, set] = entry
+      const speed = speedFor(infos[target]?.info, modelId, choice.speed)
+      set({ ...choice, model: modelId, effort, ...speed === undefined ? {} : { speed } })
       engines.set(target)
       return
     }
-    if (target !== 'dsh') return
     engines.set('dsh')
     for (const group of state.groups) {
       const model = group.models.find(item => `${group.id}/${item.id}` === modelId)
       if (model === undefined) continue
-      const level = effort ?? model.reasoning?.defaultEffort
+      const level = effort !== '' ? effort : model.reasoning?.defaultEffort
       selectModel({ provider: group.id, model: model.id, ...level === undefined ? {} : { reasoningEffort: level } })
       return
     }
-  }, [claudeChoice, codexChoice, setClaudeChoice, setCodexChoice, engines, state.groups, selectModel])
-
-  return { groups, current, label, effortLabel, pick, cwd, engine, favorites: prefs.favorites, starModel: (key: string) => { savePrefs(toggleFavorite(prefs, key)) }, info: engine === 'claude' ? claude.info : engine === 'codex' ? codex.info : undefined, choice: engine === 'codex' ? codexChoice : claudeChoice, setChoice: engine === 'codex' ? setCodexChoice : setClaudeChoice }
-}
-
-/**
- * Replaces the harness model seat.
- * @param props - the seat's lock state, plugin services and locale seat.
- * @returns the picker.
- */
-export function ProviderSeat({ locked, services, t }: { locked?: boolean; services: SeatServices; t: Translate }) {
-  const choice = useProviderChoice(services, t)
-  return <ProviderPicker groups={choice.groups} current={choice.current} label={choice.label} effortLabel={choice.effortLabel} locked={locked} favorites={choice.favorites} onToggleFavorite={choice.starModel} onPick={choice.pick} t={t} />
-}
-
-/**
- * Takes the place of the harness composer on a blank session while Claude or Codex is selected.
- * @param props - plugin services and locale seat.
- * @returns the composer.
- */
-export function NewChatComposer({ services, t }: { services: SeatServices; t: Translate }) {
-  const choice = useProviderChoice(services, t)
-  const [text, setText] = useState('')
-  const [attachments, setAttachments] = useState<AttachmentWire[]>([])
-  const [pickedCwd, setPickedCwd] = useState<string | undefined>(undefined)
-  const cwd = pickedCwd ?? choice.cwd
-  const engine: EngineName = choice.engine === 'codex' ? 'codex' : 'claude'
-  const attach = (files: File[]): void => { void toAttachments(files).then((added) => { setAttachments(current => [...current, ...added]) }) }
-  const canSend = (text.trim() !== '' || attachments.length > 0) && cwd !== ''
-  const send = (): void => {
-    if (!canSend) return
-    const { model, effort, permission } = choice.choice
-    services.startChat(engine, text.trim() === '' ? t('composer.seeAttached') : text.trim(), cwd, {
-      ...model === '' ? {} : { model }, ...effort === '' ? {} : { effort },
-      ...permission === undefined || permission === '' ? {} : { permission },
-      ...attachments.length === 0 ? {} : { attachments },
-    })
-    setText('')
-    setAttachments([])
   }
+
+  const fastTier = external ? fastTierOf(externalInfo, current.modelId) : undefined
+  const native = external ? undefined : nativePermission()
+  const nativeSelection = useProjection('permissions')
+  const nativeCatalog = useSyncExternalStore(native?.catalog.subscribe ?? noSubscribe, native?.catalog.getSnapshot ?? noPermissionCatalog).value
+  const accessChip = external
+    ? <PermissionPopover options={bridgeAccessOptions(t)} value={externalChoice.permission ?? ''} locked={locked} onChange={(permission) => { setExternalChoice({ ...externalChoice, permission: permission as PermissionPreset | '' }) }} t={t} />
+    : native === undefined || nativeCatalog === null || nativeSelection === undefined
+      ? undefined
+      : <PermissionPopover options={nativeAccessOptions(nativeCatalog.options, t)} value={nativeSelection.currentValue} riskValues={RISKY_NATIVE_PRESETS} locked={locked} onChange={(preset) => { void native.select(preset).catch((error: unknown) => { console.warn('agent-bridge: permission change failed', error) }) }} t={t} />
   return (
-    <div className={css.composerStack} data-testid="ext-new-chat">
-      <div className={pickerCss.workspaceRow}>
-        <span className={pickerCss.workspaceName} title={cwd}>{cwd.split('/').filter(Boolean).pop() ?? cwd}</span>
-        <DirPicker start={cwd} onPick={setPickedCwd} t={t} />
-      </div>
-      <SlashMenu text={text} commands={choice.info?.commands ?? []} onPick={(name) => { setText(`/${name} `) }} />
-      <div className={css.composerCard}>
-        <AttachmentChips attachments={attachments} onRemove={(index) => { setAttachments(current => current.filter((_, position) => position !== index)) }} t={t} />
-        <textarea
-          className={css.text} data-testid="ext-new-chat-input" rows={2} value={text} autoFocus placeholder={t(engine === 'codex' ? 'composer.placeholderCodex' : 'composer.placeholder')}
-          onChange={(event) => { setText(event.target.value) }}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
-            event.preventDefault()
-            send()
-          }}
-          onPaste={(event) => {
-            const files = Array.from(event.clipboardData.files)
-            if (files.length > 0) { event.preventDefault(); attach(files) }
-          }}
-        />
-        <div className={css.toolbar}>
-          <div className={css.tools}>
-            <ComposerBar part="leading" engine={engine} info={choice.info} choice={choice.choice} onChoice={choice.setChoice} onAttach={attach} onDictated={(spoken) => { setText(current => current === '' ? spoken : `${current} ${spoken}`) }} t={t} />
-          </div>
-          <div className={css.trailing}>
-            <ProviderPicker groups={choice.groups} current={choice.current} label={choice.label} effortLabel={choice.effortLabel} favorites={choice.favorites} onToggleFavorite={choice.starModel} onPick={choice.pick} t={t} />
-            <button type="button" className={css.primary} data-testid="ext-new-chat-send" aria-label={t('composer.send')} title={t('composer.send')} disabled={!canSend} onClick={send}>
-              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden><path d="M8 2.500 8 13.500M3.500 7 8 2.500 12.500 7" fill="none" stroke="currentColor" strokeWidth="1.600" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <ProviderPicker
+      groups={groups} current={current} label={label} effortLabel={effortLabel} locked={locked}
+      favorites={prefs.favorites} onToggleFavorite={(key) => { savePrefs(toggleFavorite(prefs, key)) }} onPick={pick} accessChip={accessChip} onOpenSettings={services.openSettings} savedEfforts={prefs.efforts}
+      speed={external ? { available: fastTier !== undefined, fast: fastTier !== undefined && (externalChoice.speed ?? '') !== '', onChange: (fast) => { setExternalChoice({ ...externalChoice, speed: fast ? fastTier ?? '' : '' }) } } : undefined}
+      access={external
+        ? <PermissionPicker value={externalChoice.permission ?? ''} onChange={(permission) => { setExternalChoice({ ...externalChoice, permission: permission as PermissionPreset | '' }) }} t={t} />
+        : native === undefined ? undefined : <NativeAccess native={native} useProjection={useProjection} t={t} />}
+      t={t}
+    />
   )
 }

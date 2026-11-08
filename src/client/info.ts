@@ -1,25 +1,26 @@
 /** What the engine offers for a working directory (models, commands, MCP servers, account), cached per page. */
 import { useCallback, useEffect, useState } from 'react'
-import { INFO_PATH, type EngineName, type InfoWire } from '../protocol.ts'
+import { INFO_PATH, providerEngine, providerInstance, type InfoWire } from '../protocol.ts'
 
 const cache = new Map<string, InfoWire>()
 /** Latest info per engine, shown for a folder whose own info is still loading; models and defaults rarely differ between folders. */
 const latest = new Map<string, InfoWire>()
 const inflight = new Map<string, Promise<InfoWire>>()
 
-/** Fetch (or reuse) the info of one engine and directory. */
-export async function loadInfo(engine: EngineName, cwd: string, fresh = false): Promise<InfoWire> {
-  const key = `${engine}:${cwd}`
+/** Fetch (or reuse) the info of one provider and directory. */
+export async function loadInfo(provider: string, cwd: string, fresh = false): Promise<InfoWire> {
+  const key = `${provider}:${cwd}`
   const known = cache.get(key)
   if (known !== undefined && !fresh) return known
   const pending = inflight.get(key)
   if (pending !== undefined && !fresh) return await pending
-  const request = fetch(`${INFO_PATH}?${new URLSearchParams({ engine, cwd, ...fresh ? { fresh: '1' } : {} }).toString()}`, { credentials: 'same-origin' })
+  const instance = providerInstance(provider)
+  const request = fetch(`${INFO_PATH}?${new URLSearchParams({ engine: providerEngine(provider), cwd, ...instance === undefined ? {} : { instance }, ...fresh ? { fresh: '1' } : {} }).toString()}`, { credentials: 'same-origin' })
     .then(async (response) => {
       const body = await response.json() as InfoWire & { error?: string }
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
       cache.set(key, body)
-      latest.set(engine, body)
+      latest.set(provider, body)
       return body
     })
     .finally(() => { inflight.delete(key) })
@@ -28,7 +29,7 @@ export async function loadInfo(engine: EngineName, cwd: string, fresh = false): 
 }
 
 /** Hook over {@link loadInfo}. */
-export function useInfo(engine: EngineName, cwd: string | undefined): {
+export function useInfo(engine: string, cwd: string | undefined): {
   info: InfoWire | undefined; error: string | undefined; reload: () => void
 } {
   // Kept with the engine and folder it was loaded for, so another session never shows this one's models.
@@ -46,4 +47,34 @@ export function useInfo(engine: EngineName, cwd: string | undefined): {
     return () => { cancelled = true }
   }, [engine, cwd, version])
   return { info: info?.key === key ? info.value : latest.get(engine), error, reload: useCallback(() => { setVersion(n => n + 1) }, []) }
+}
+
+/** One provider's entry of {@link useInfos}. */
+export interface ProviderInfo { readonly info: InfoWire | undefined; readonly error: string | undefined }
+
+/**
+ * Hook over {@link loadInfo} for a list of providers that can change between renders.
+ * @param providers - provider ids.
+ * @param cwd - working directory; empty loads nothing.
+ * @returns each provider's info and load error.
+ */
+export function useInfos(providers: readonly string[], cwd: string | undefined): Readonly<Record<string, ProviderInfo>> {
+  const [loaded, setLoaded] = useState<Readonly<Record<string, { key: string; info?: InfoWire; error?: string }>>>({})
+  const list = providers.join('|')
+  useEffect(() => {
+    if (cwd === undefined || cwd === '') return undefined
+    let cancelled = false
+    for (const provider of providers) {
+      const key = `${provider}:${cwd}`
+      void loadInfo(provider, cwd).then(
+        (info) => { if (!cancelled) setLoaded(current => ({ ...current, [provider]: { key, info } })) },
+        (reason: unknown) => { if (!cancelled) setLoaded(current => ({ ...current, [provider]: { key, error: reason instanceof Error ? reason.message : String(reason) } })) },
+      )
+    }
+    return () => { cancelled = true }
+  }, [list, cwd])
+  return Object.fromEntries(providers.map((provider) => {
+    const entry = loaded[provider]
+    return [provider, { info: entry?.key === `${provider}:${cwd ?? ''}` && entry.info !== undefined ? entry.info : latest.get(provider), error: entry?.error }]
+  }))
 }

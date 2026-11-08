@@ -18,6 +18,7 @@ export interface TimelineMessage {
   readonly items: readonly TimelineItem[]
   /** Set when the conversation moved to this provider at this message. */
   readonly switchedTo?: EngineName | undefined
+  readonly switchedToProvider?: string | undefined
 }
 
 /**
@@ -60,7 +61,7 @@ export function buildTimeline(messages: readonly MessageWire[]): TimelineMessage
           break
       }
     }
-    if (items.length > 0) timeline.push({ id: message.id, role: message.role, items, ...message.switchedTo === undefined ? {} : { switchedTo: message.switchedTo } })
+    if (items.length > 0) timeline.push({ id: message.id, role: message.role, items, ...message.switchedTo === undefined ? {} : { switchedTo: message.switchedTo }, ...message.switchedToProvider === undefined ? {} : { switchedToProvider: message.switchedToProvider } })
   }
   return timeline
 }

@@ -54,6 +54,58 @@ export const NEW_PI_SESSION_ID = 'pi:new'
 /** The coding agents the plugin drives. */
 export type EngineName = 'claude' | 'codex' | 'pi'
 
+
+/** Providers that exist without being added; an added instance cannot use these ids. */
+export const DEFAULT_PROVIDER_IDS: readonly string[] = ['claude', 'codex', 'pi', 'dsh']
+
+/**
+ * @param engine - engine.
+ * @param instance - added instance, if any.
+ * @returns the provider id: the engine, or `engine@instance` for an added instance.
+ */
+export function providerId(engine: EngineName, instance: string | undefined): string {
+  return instance === undefined ? engine : `${engine}@${instance}`
+}
+
+/** @param provider - provider id. @returns its engine. */
+export function providerEngine(provider: string): EngineName {
+  const engine = provider.split('@')[0]
+  return engine === 'codex' || engine === 'pi' ? engine : 'claude'
+}
+
+/** @param provider - provider id. @returns its added instance, if any. */
+export function providerInstance(provider: string): string | undefined {
+  const at = provider.indexOf('@')
+  return at === -1 ? undefined : provider.slice(at + 1)
+}
+
+/** @param id - session id of a provider's default instance. @param instance - added instance. @returns the session id of that instance. */
+export function withInstanceId(id: string, instance: string): string {
+  const at = id.indexOf(':')
+  return `${id.slice(0, at + 1)}@${instance}:${id.slice(at + 1)}`
+}
+
+/** @param id - session id. @returns the added instance the id names, if any. */
+export function instanceOfSession(id: string | undefined): string | undefined {
+  return id === undefined ? undefined : /^[a-z]+:@([^:]+):/.exec(id)?.[1]
+}
+
+/** @param id - session id. @returns the provider of the session. */
+export function providerOfSession(id: string | undefined): string {
+  return providerId(engineOfSession(id), instanceOfSession(id))
+}
+
+/** @param provider - provider id. @returns the id of that provider's new-session draft. */
+export function draftIdFor(provider: string): string {
+  const instance = providerInstance(provider)
+  return `${providerEngine(provider)}:${instance === undefined ? '' : `@${instance}:`}new`
+}
+
+/** @param id - session id. @returns whether it is a new-session draft of any provider. */
+export function isDraftId(id: string | undefined): boolean {
+  return id !== undefined && /^[a-z]+:(@[^:]+:)?new$/.test(id)
+}
+
 /**
  * @param id - external session or draft id.
  * @returns the engine that owns it; anything without another engine's prefix is Claude's.
@@ -115,6 +167,7 @@ export interface MessageWire {
   readonly blocks: readonly BlockWire[]
   /** On the first message after a provider switch in a linked conversation: the new provider. */
   readonly switchedTo?: EngineName
+  readonly switchedToProvider?: string
 }
 
 /** Active /goal of a session. */
@@ -183,6 +236,8 @@ export interface SendBodyWire {
   readonly id?: string
   readonly cwd?: string
   readonly text: string
+  /** Added instance of a new session or of the provider to switch to. */
+  readonly instance?: string
   /** Session the user is leaving: the message goes to `engine`'s thread of this conversation, with a catch-up. Needs `engine` and `cwd`. */
   readonly switchFrom?: string
   /** Model and reasoning effort for this turn; empty uses the engine default. */
@@ -192,6 +247,8 @@ export interface SendBodyWire {
   readonly permission?: PermissionPreset
   /** Files attached to the message. */
   readonly attachments?: readonly AttachmentWire[]
+  /** The provider's fast tier, or empty for standard speed; absent leaves the provider's own setting. */
+  readonly speed?: string
 }
 
 /** One attached file, base64-encoded. */
@@ -286,7 +343,7 @@ export type FsActionWire =
   | { readonly cwd: string; readonly action: 'upload'; readonly path: string; readonly name: string; readonly base64: string }
 
 /** Model and effort used for an engine's messages; an empty string leaves the choice to the engine. */
-export interface ChoiceWire { readonly model: string; readonly effort: string; readonly permission?: PermissionPreset | '' }
+export interface ChoiceWire { readonly model: string; readonly effort: string; readonly permission?: PermissionPreset | ''; /** The provider's fast tier, or empty for standard speed; absent leaves the provider's own setting. */ readonly speed?: string }
 
 /** One image read for preview. */
 export interface FsImageWire { readonly mime: string; readonly base64: string }
@@ -297,12 +354,27 @@ export interface FsBrowseWire { readonly path: string; readonly parent: string |
 export const INFO_PATH = '/api/agent-bridge/info'
 /** GET and POST: the user's model order, hidden models, favorites and custom models. */
 export const MODEL_PREFS_PATH = '/api/agent-bridge/model-prefs'
-/** Providers whose model list the user can change. */
-export type PrefsEngine = 'claude' | 'codex'
+/** GET and POST: the added provider instances. */
+export const INSTANCES_PATH = '/api/agent-bridge/instances'
+/** A provider instance the user added. */
+export interface ProviderInstanceWire {
+  readonly id: string
+  readonly engine: 'claude' | 'codex'
+  readonly label: string
+  readonly accent?: string
+  readonly binaryPath?: string
+  /** `CODEX_HOME` or `CLAUDE_CONFIG_DIR` of this instance. */
+  readonly home: string
+  readonly launchArgs?: string
+}
+/** Body of the instances route. */
+export type InstanceBodyWire = { readonly action: 'add'; readonly instance: unknown } | { readonly action: 'remove'; readonly id: string }
+/** Provider id of a model list the user can change: `dsh`, `claude`, `codex`, or `engine@instance`. */
+export type PrefsEngine = string
 /** One provider's model list settings. */
 export interface EngineModelPrefsWire { readonly hidden: readonly string[]; readonly order: readonly string[]; readonly custom: readonly string[] }
 /** Body of the model preferences route; `favorites` holds `engine/model` keys. */
-export interface ModelPrefsWire { readonly engines: Partial<Record<PrefsEngine, EngineModelPrefsWire>>; readonly favorites: readonly string[] }
+export interface ModelPrefsWire { readonly engines: Partial<Record<PrefsEngine, EngineModelPrefsWire>>; readonly favorites: readonly string[]; /** Providers the user turned off; the selector does not offer them. */ readonly disabled?: readonly PrefsEngine[]; /** Last reasoning level of each model, by `engine/model` key. */ readonly efforts?: Readonly<Record<string, string>> }
 /** GET: plugin, dsh and engine versions for the settings tab. */
 export const ABOUT_PATH = '/api/agent-bridge/about'
 export const SEARCH_PATH = '/api/agent-bridge/search'
@@ -316,7 +388,7 @@ export const MCP_PATH = '/api/agent-bridge/mcp'
 export const GIT_CONFIG_PATH = '/api/agent-bridge/git/config'
 
 /** One selectable model. */
-export interface ModelWire { readonly value: string; readonly name: string; readonly description: string; readonly efforts: readonly string[]; readonly isDefault?: boolean }
+export interface ModelWire { readonly value: string; readonly name: string; readonly description: string; readonly efforts: readonly string[]; readonly isDefault?: boolean; /** Speed tier that selects fast mode; absent when the model has none. */ readonly fastTier?: string }
 /** One slash command. */
 export interface CommandWire { readonly name: string; readonly description: string; readonly argumentHint: string }
 /** One MCP server and its state. */

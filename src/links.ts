@@ -3,12 +3,12 @@
  * switch adds to the first message the other provider receives.
  * @module dsh-agent-bridge/links
  */
-import { CLAUDE_ID_PREFIX, CODEX_ID_PREFIX, type EngineName, type MessageWire } from './protocol.ts'
+import { CLAUDE_ID_PREFIX, CODEX_ID_PREFIX, providerEngine, providerOfSession, type EngineName, type MessageWire } from './protocol.ts'
 
 /** One conversation that continues across providers. */
 export interface ThreadLink {
-  /** Prefixed session id of each provider's thread. */
-  readonly threads: Partial<Record<EngineName, string>>
+  /** Prefixed session id of each provider's thread, by provider id. */
+  readonly threads: Readonly<Record<string, string>>
   /** The thread that received the last message; the sidebar lists only this one. */
   readonly active: string
   /** For each thread, the newest of its messages the other thread has already been given. */
@@ -48,14 +48,12 @@ const DEFAULT_LIMITS: CatchupLimits = { total: 24_000, perMessage: 4_000 }
 const LABELS: Partial<Record<EngineName, string>> = { claude: 'Claude Code', codex: 'Codex' }
 
 /**
- * Engine of a prefixed session id.
+ * Provider of a prefixed session id.
  * @param id - prefixed session id.
- * @returns the engine, or undefined for a provider a switch does not support.
+ * @returns the provider id, or undefined for a provider a switch does not support.
  */
-export function switchEngineOf(id: string): EngineName | undefined {
-  if (id.startsWith(CLAUDE_ID_PREFIX)) return 'claude'
-  if (id.startsWith(CODEX_ID_PREFIX)) return 'codex'
-  return undefined
+export function switchProviderOf(id: string): string | undefined {
+  return id.startsWith(CLAUDE_ID_PREFIX) || id.startsWith(CODEX_ID_PREFIX) ? providerOfSession(id) : undefined
 }
 
 /** @param text - message text. @returns the text without catch-up blocks. */
@@ -139,9 +137,9 @@ export function renderCatchup(from: EngineName, messages: readonly MessageWire[]
  * @param limits - catch-up size limits.
  * @returns the plan.
  */
-export function planSwitch(links: readonly ThreadLink[], sourceId: string, target: EngineName, messages: readonly MessageWire[], limits?: CatchupLimits): SwitchPlan {
-  const from = switchEngineOf(sourceId)
-  if (from === undefined || from === target || LABELS[target] === undefined) throw new Error(`cannot switch from ${sourceId} to ${target}`)
+export function planSwitch(links: readonly ThreadLink[], sourceId: string, target: string, messages: readonly MessageWire[], limits?: CatchupLimits): SwitchPlan {
+  const from = switchProviderOf(sourceId)
+  if (from === undefined || from === target || LABELS[providerEngine(target)] === undefined) throw new Error(`cannot switch from ${sourceId} to ${target}`)
   const link = links.find(item => item.threads[from] === sourceId)
   const targetId = link?.threads[target]
   const cursor = targetId === undefined ? undefined : link?.delivered[sourceId]
@@ -150,7 +148,7 @@ export function planSwitch(links: readonly ThreadLink[], sourceId: string, targe
   const newest = messages[messages.length - 1]?.id ?? cursor
   return {
     ...targetId === undefined ? {} : { targetId },
-    catchup: renderCatchup(from, messages.slice(at + 1), gap, limits),
+    catchup: renderCatchup(providerEngine(from), messages.slice(at + 1), gap, limits),
     ...newest === undefined ? {} : { deliveredThrough: newest },
   }
 }
@@ -180,8 +178,8 @@ export function isCommand(text: string): boolean {
  * @returns the new links.
  */
 export function recordSwitch(links: readonly ThreadLink[], sourceId: string, targetId: string, deliveredThrough?: string, shownThrough?: string): ThreadLink[] {
-  const from = switchEngineOf(sourceId)
-  const to = switchEngineOf(targetId)
+  const from = switchProviderOf(sourceId)
+  const to = switchProviderOf(targetId)
   if (from === undefined || to === undefined) throw new Error(`cannot link ${sourceId} and ${targetId}`)
   const existing = links.find(item => item.threads[from] === sourceId || item.threads[to] === targetId)
   const next: ThreadLink = {
@@ -210,18 +208,19 @@ export function linkOf(links: readonly ThreadLink[], id: string): ThreadLink | u
  * @returns the merged messages; the first message after each switch names the provider in `switchedTo`.
  */
 export function mergeLinkedMessages(link: ThreadLink, activeId: string, threads: Readonly<Record<string, readonly MessageWire[]>>): MessageWire[] {
-  const segments = link.segments ?? Object.values(link.threads).filter((id): id is string => id !== undefined && id !== activeId).map(thread => ({ thread, through: link.delivered[thread] ?? '' }))
+  const segments = link.segments ?? Object.values(link.threads).filter(id => id !== activeId).map(thread => ({ thread, through: link.delivered[thread] ?? '' }))
   const consumed = new Map<string, number>()
   const merged: MessageWire[] = []
-  let shownEngine: EngineName | undefined
+  let shownProvider: string | undefined
   const append = (thread: string, end: number): void => {
     const start = consumed.get(thread) ?? 0
     const run = (threads[thread] ?? []).slice(start, end)
     consumed.set(thread, Math.max(start, end))
     if (run.length === 0) return
-    const engine = switchEngineOf(thread)
-    run.forEach((message, index) => { merged.push(index === 0 && shownEngine !== undefined && shownEngine !== engine && engine !== undefined ? { ...message, switchedTo: engine } : message) })
-    shownEngine = engine
+    const provider = switchProviderOf(thread)
+    const engine = provider === undefined ? undefined : providerEngine(provider)
+    run.forEach((message, index) => { merged.push(index === 0 && shownProvider !== undefined && shownProvider !== provider && engine !== undefined ? { ...message, switchedTo: engine, switchedToProvider: provider as string } : message) })
+    shownProvider = provider
   }
   segments.forEach((segment, index) => {
     const messages = threads[segment.thread] ?? []
@@ -235,7 +234,7 @@ export function mergeLinkedMessages(link: ThreadLink, activeId: string, threads:
 
 /** @param links - stored links. @returns the threads the sidebar must not list, because their conversation shows another one. */
 export function hiddenThreadIds(links: readonly ThreadLink[]): Set<string> {
-  return new Set(links.flatMap(link => Object.values(link.threads).filter((id): id is string => id !== undefined && id !== link.active)))
+  return new Set(links.flatMap(link => Object.values(link.threads).filter(id => id !== link.active)))
 }
 
 /**

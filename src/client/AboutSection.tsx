@@ -4,10 +4,11 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { ABOUT_PATH, type AboutWire } from '../protocol.ts'
 import { aboutRows, type AboutRow } from './about.ts'
+import { ProvidersPanel } from './ModelsSection.tsx'
 import css from './AboutSection.module.css'
 
 /** Props the settings shell and the locale seat pass. */
-export type AboutSectionProps = PropsRuntime<'settings.section'> & PropsLocale<'agent-bridge'>
+export type AboutSectionProps = PropsRuntime<'settings.section'> & PropsLocale<'agent-bridge'> & { getDefaultCwd: () => string; codexEnabled: () => boolean }
 
 const NAME_KEY = { dsh: 'about.name.dsh', claude: 'about.name.claude', codex: 'about.name.codex', pi: 'about.name.pi' } as const
 const STATUS_KEY = {
@@ -20,7 +21,7 @@ const STATUS_KEY = {
  * @param props - locale seat.
  * @returns the page.
  */
-export function AboutSection({ t }: AboutSectionProps) {
+export function AboutSection({ t, getDefaultCwd, codexEnabled }: AboutSectionProps) {
   const [about, setAbout] = useState<AboutWire | 'failed' | undefined>(undefined)
   const [asked, setAsked] = useState(0)
   useEffect(() => {
@@ -48,6 +49,7 @@ export function AboutSection({ t }: AboutSectionProps) {
   )
   return (
     <section className={css.page} data-testid="about-section">
+      <ProvidersPanel t={t} getDefaultCwd={getDefaultCwd} codexEnabled={codexEnabled} rows={about === undefined || about === 'failed' ? [] : aboutRows(about)} />
       <div className={css.top}>
         <h3>{t('about.title')}</h3>
         <button type="button" data-testid="about-refresh" disabled={about === undefined} onClick={() => { setAsked(asked + 1) }}>{t('about.refresh')}</button>

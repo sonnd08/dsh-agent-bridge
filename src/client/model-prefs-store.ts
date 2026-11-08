@@ -32,6 +32,11 @@ function save(next: ModelPrefsWire): void {
     .catch((error: unknown) => { console.warn('agent-bridge: model preferences failed to save', error) })
 }
 
+/** @returns the preferences as the page knows them now, for code outside a component. */
+export function currentModelPrefs(): ModelPrefsWire {
+  return prefs
+}
+
 /** @returns the preferences and a function that saves new ones. */
 export function useModelPrefs(): [ModelPrefsWire, (next: ModelPrefsWire) => void] {
   useEffect(load, [])

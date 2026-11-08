@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { effortName, engineLabels, engineModels, modelTitle } from '../src/client/model-names.ts'
+import { effortName, engineLabels, engineModels, fastTierOf, modelTitle, speedFor } from '../src/client/model-names.ts'
 
 const claude = {
   models: [
@@ -32,8 +32,8 @@ test('model names: the Default entry is not a row', () => {
 })
 
 test('model names: no pick selects and names the model the engine uses', () => {
-  assert.deepEqual(engineLabels('claude', claude, NONE), { modelId: 'opus', label: 'Claude Opus 5.5', effort: 'High' })
-  assert.deepEqual(engineLabels('codex', codex, NONE), { modelId: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', effort: '' })
+  assert.deepEqual(engineLabels('claude', claude, NONE), { modelId: 'opus', label: 'Claude Opus 5.5', effort: 'High', effortId: '' })
+  assert.deepEqual(engineLabels('codex', codex, NONE), { modelId: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', effort: '', effortId: '' })
 })
 
 test('model names: a saved pick of the Default entry reads as no pick', () => {
@@ -41,14 +41,30 @@ test('model names: a saved pick of the Default entry reads as no pick', () => {
 })
 
 test('model names: a picked model and effort are shown', () => {
-  assert.deepEqual(engineLabels('claude', claude, { model: 'haiku', effort: 'low' }), { modelId: 'haiku', label: 'Claude Haiku 5.5', effort: 'Low' })
+  assert.deepEqual(engineLabels('claude', claude, { model: 'haiku', effort: 'low' }), { modelId: 'haiku', label: 'Claude Haiku 5.5', effort: 'Low', effortId: 'low' })
 })
 
 test('model names: an unlisted model shows its id, and loading shows nothing yet', () => {
   assert.equal(engineLabels('claude', claude, { model: 'claude-x', effort: '' }).label, 'claude-x')
-  assert.deepEqual(engineLabels('claude', undefined, NONE), { modelId: '', label: '', effort: '' })
+  assert.deepEqual(engineLabels('claude', undefined, NONE), { modelId: '', label: '', effort: '', effortId: '' })
 })
 
 test('model names: reasoning levels read as words', () => {
   assert.equal(effortName('medium'), 'Medium')
+})
+
+test('model names: only a model with a fast tier can be fast', () => {
+  const info = { models: [{ value: 'a', name: 'A', description: '', efforts: [], fastTier: 'priority' }, { value: 'b', name: 'B', description: '', efforts: [] }], commands: [], mcp: [] }
+  assert.equal(fastTierOf(info, 'a'), 'priority')
+  assert.equal(fastTierOf(info, 'b'), undefined)
+  assert.equal(speedFor(info, 'a', 'fast'), 'priority')
+  assert.equal(speedFor(info, 'b', 'fast'), '')
+  assert.equal(speedFor(info, 'a', ''), '')
+  assert.equal(speedFor(info, 'a', undefined), undefined)
+})
+
+test('model names: a model with no saved level uses Medium when it supports it', () => {
+  const info = { models: [{ value: 'a', name: 'A', description: '', efforts: ['low', 'medium'] }], commands: [], mcp: [], defaults: { effort: 'high' } }
+  assert.deepEqual(engineLabels('codex', info, { model: 'a', effort: '' }), { modelId: 'a', label: 'A', effort: 'Medium', effortId: 'medium' })
+  assert.equal(engineLabels('codex', info, { model: 'a', effort: 'low' }).effortId, 'low')
 })

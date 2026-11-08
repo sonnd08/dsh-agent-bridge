@@ -29,6 +29,78 @@ Copy this template to the top of the **Log** section.
 
 Put the newest entry first.
 
+### 2026-11-09: Add provider instances
+
+- **What:** Settings → Agent Bridge has **+ Add provider**. A 3-step dialog (Provider, Identity, Config) adds a Claude or Codex instance with a label, an ID, an accent color, a binary path, a home folder and launch arguments. Each instance has its own login and sessions: Claude uses `CLAUDE_CONFIG_DIR` and Codex uses `CODEX_HOME`. The host makes the home folder when the instance is added, because Codex does not start if `CODEX_HOME` is missing. Each instance has a rail in the selector, its own models, reasoning levels and favorites, a login command and a **Remove this provider** button. A removal does not delete the home folder. The DeepSeek Harness models are a fixed row of the provider list, and that row has no remove button.
+- **Why:** The user can use more than one Claude or Codex account, as in T3 Code.
+- **Files:** `src/instances.ts`, `src/protocol.ts`, `src/index.ts`, `src/claude.ts`, `src/run.ts`, `src/codex.ts`, `src/extras.ts`, `src/links.ts`, `src/model-prefs.ts`, `src/client/AddProviderDialog.tsx`, `src/client/providers-store.ts`, `src/client/dsh-catalog-store.ts`, `src/client/ModelsSection.tsx`, `src/client/ProviderPicker.tsx`, `src/client/NewChat.tsx`, `src/client/ExternalPanel.tsx`, `src/client/locales.ts`, `tests/instances.test.mjs`.
+- **Upstream merge risk:** Medium. The session ID format of an instance (`claude:@work:uuid`) touches the upstream ID parser in `src/index.ts`.
+- **Verified:** `instances` unit tests pass. In the DSH desktop app, a Claude instance and a Codex instance were added and removed, the rail showed the instance models, and a session in the instance folder opened. A turn on the Claude instance used the instance folder and returned the sign-in error. A successful turn on a signed-in instance was not tested, because the test instances have no login.
+
+### 2026-11-09: Correct sign-in status
+
+- **What:** A Claude account report with `tokenSource: "none"` now shows **Not signed in**. Codex no longer shows **Not signed in**, because its account read returns no account even when it is signed in.
+- **Why:** The provider list showed the wrong state for both engines.
+- **Files:** `src/run.ts`, `src/client/ModelsSection.tsx`, `tests/instances.test.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** `instances` unit tests pass. In the DSH desktop app, Codex showed **Available** and a Claude instance with no login showed **Not signed in**.
+
+### 2026-11-09: Favorites tab in the provider list
+
+- **What:** The provider list starts with a **Favorites** tab for all providers. It can reorder, unfavorite and disable models. A changed row stays until the tab opens again. The order of this tab is the order of the Favorites rail in the selector. The selector opens on the last rail that the user chose.
+- **Why:** The user can manage favorites in one place and undo a change.
+- **Files:** `src/model-prefs.ts`, `src/client/ModelsSection.tsx`, `src/client/ModelsSection.module.css`, `src/client/ProviderPicker.tsx`, `src/client/locales.ts`, `tests/model-prefs.test.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** `model-prefs` unit tests pass. In the DSH desktop app, unfavorite, disable and reorder were checked, and a changed row stayed in the list.
+
+### 2026-11-09: No new-session rows in the sidebar
+
+- **What:** The Workspace browser no longer lists **+ New Claude session** and **+ New Codex session**. New chats start from the selector. The standalone "Claude / Codex" fallback page keeps these rows.
+- **Why:** The selector replaces these rows.
+- **Files:** `src/client/graft.tsx`, `tests/graft.test.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** `graft` unit tests pass, and the rows were absent in the DSH desktop app.
+
+### 2026-11-09: Reasoning level per model
+
+- **What:** The selector saves the reasoning level of each model. A model pick restores the model's saved level, else keeps the current level if the model supports it, else uses Medium if the model supports it. The Reasoning column marks the saved level of the model under the pointer. Medium is also used when no level is saved, and it is sent with the message.
+- **Why:** A model pick must not reset the selected level.
+- **Files:** `src/model-prefs.ts`, `src/protocol.ts`, `src/client/NewChat.tsx`, `src/client/ExternalPanel.tsx`, `tests/model-prefs.test.mjs`.
+- **Upstream merge risk:** Low.
+- **Verified:** `model-prefs` and `model-names` unit tests pass. In the DSH desktop app, a model change kept the level and each Claude model restored its own level.
+
+### 2026-11-09: Settings gear in the selector
+
+- **What:** The selector footer has a gear to the left of **Standard / Fast**. The gear opens the Agent Bridge settings tab.
+- **Why:** The user can reach the provider and model settings directly from the selector.
+- **Files:** `src/client/ProviderPicker.tsx`, `src/client/ProviderPicker.module.css`, `src/client/NewChat.tsx`, `src/client/ExternalPanel.tsx`, `src/client/index.ts`, `src/client/locales.ts`.
+- **Upstream merge risk:** Medium. The gear uses the store of the DSH `sidebar.settings` slot entry, which is not a published API. If the store is absent, the gear is not shown.
+- **Verified:** In the DSH desktop app, the gear opened the Agent Bridge tab.
+
+### 2026-11-09: Separate Permissions popup
+
+- **What:** The access chip in the chat bar opens its own **Permissions** popup with an icon row and a description of each level. The selector footer keeps its access menu.
+- **Why:** The user can see what a level does and change it without opening the model selector, as in T3 Code.
+- **Files:** `src/client/PermissionPicker.tsx`, `src/client/ProviderPicker.tsx`, `src/client/ProviderPicker.module.css`, `src/client/NewChat.tsx`, `src/client/ExternalPanel.tsx`, `src/client/locales.ts`.
+- **Upstream merge risk:** Low. `src/client/PermissionPicker.tsx` is the only upstream file with a large change.
+- **Verified:** In the DSH desktop app, the popup, a level change and the Full access risk dialog were checked for a new Claude chat.
+
+### 2026-11-09: Provider settings in Agent Bridge and chat-bar indicators
+
+- **What:** The provider list and model settings moved from a separate settings tab into the Agent Bridge page. Each provider shows its version and status and has an on/off switch. The chat bar shows the provider icon, a Fast mark and the current access. DeepSeek's account and official providers come first in the selector, as in the native selector.
+- **Why:** The settings belong with the plugin, as on the Providers page of T3 Code, and the chat bar must show the Fast and access choices.
+- **Files:** `src/client/ModelsSection.tsx`, `src/client/ModelsSection.module.css`, `src/client/AboutSection.tsx`, `src/client/ProviderPicker.tsx`, `src/client/ProviderPicker.module.css`, `src/client/PermissionPicker.tsx`, `src/client/NewChat.tsx`, `src/client/ExternalPanel.tsx`, `src/client/index.ts`, `src/client/model-prefs-store.ts`, `src/client/locales.ts`, `src/model-prefs.ts`, `src/protocol.ts`, `tests/model-prefs.test.mjs`.
+- **Upstream merge risk:** Low. `src/client/AboutSection.tsx` has one added panel.
+- **Verified:** `model-prefs`, `model-names` and `links` unit tests pass. In the DSH desktop app, the Agent Bridge page, the provider on/off switch, the chat-bar access chip and the DeepSeek footer were checked. The Fast mark and the corrected DeepSeek access label were built but not checked in the app. Multiple instances of one provider are not implemented.
+
+### 2026-11-09: Native new-session screen, Standard/Fast and access in the selector
+
+- **What:** The DSH new-session screen stays native. The plugin no longer replaces the composer: it wraps `conversation.sendSession` and routes the send of a blank session to Claude or Codex when one of them is selected. The selector popup has a footer with **Standard / Fast** and the access control, and the model list scrolls. The access control is removed from the DSH composer row and from the Claude/Codex composer. Fast uses Claude's `fastMode` setting and the Codex service tier, and each provider reports which models support it.
+- **Why:** The new-session screen must not change except for the selector. Access depends on the selected provider, so it belongs with the selector.
+- **Files:** `src/client/NewChat.tsx`, `src/client/ProviderPicker.tsx`, `src/client/ProviderPicker.module.css`, `src/client/PermissionPicker.tsx`, `src/client/ComposerBar.tsx`, `src/client/ExternalPanel.tsx`, `src/client/index.ts`, `src/client/model-names.ts`, `src/client/transcript.ts`, `src/client/locales.ts`, `src/run.ts`, `src/codex.ts`, `src/index.ts`, `src/protocol.ts`, `tests/model-names.test.mjs`.
+- **Upstream merge risk:** High for the `conversation.sendSession` wrap, which depends on a DSH method that is not a published extension point. If the method is absent, new chats stay with DSH and the plugin logs a warning.
+- **Verified:** `model-names`, `model-prefs` and `links` unit tests pass. In the DSH desktop app, a Claude chat started from the native composer, the list scrolled, and a Codex turn with Fast wrote `service_tier: priority`. A real Claude turn with Fast was not run.
+
 ### 2026-11-08: One transcript across a provider switch
 
 - **What:** The session route merges the linked Claude and Codex threads, in the order of the switches, and the chat shows a "Switched to" divider at each switch. The chat stays on screen while the merged transcript loads. Each switch now records its position in `ThreadLink.segments`. A link without segments shows the other thread first.
@@ -39,7 +111,7 @@ Put the newest entry first.
 
 ### 2026-11-08: Model management for Claude and Codex
 
-- **What:** A new **Agent models** settings page shows each provider's models. The user can reorder models, hide or show them, mark favorites, and add or remove custom model IDs. The selector follows these settings. Favorites moved from browser storage to the plugin state file.
+- **What:** The Agent Bridge settings page shows each provider's models. The user can reorder models, hide or show them, mark favorites, and add or remove custom model IDs. The selector follows these settings. Favorites moved from browser storage to the plugin state file.
 - **Why:** A user must be able to keep only the needed models in the selector, as in T3 Code.
 - **Files:** `src/model-prefs.ts`, `src/protocol.ts`, `src/extras.ts`, `src/index.ts`, `src/client/ModelsSection.tsx`, `src/client/ModelsSection.module.css`, `src/client/model-prefs-store.ts`, `src/client/model-names.ts`, `src/client/NewChat.tsx`, `src/client/ProviderPicker.tsx`, `src/client/ExternalPanel.tsx`, `src/client/index.ts`, `src/client/locales.ts`, `tests/model-prefs.test.mjs`.
 - **Upstream merge risk:** Low. The change adds a route, a state field and a settings section.
