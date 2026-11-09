@@ -445,6 +445,7 @@ export function connectRowMarks(sessions: RowMarkSessions): () => void {
   notifyRowMarks()
   return () => {
     unsubscribe()
+    if (rowMarkSessions !== sessions) return
     rowMarkSessions = undefined
     notifyRowMarks()
   }

@@ -209,7 +209,8 @@ export function ProvidersPanel({ t, getDefaultCwd, codexEnabled, rows }: { t: Tr
                 <div className={css.instanceBar}>
                   <span>{t('providers.loginHint')}</span>
                   <code className={css.loginCommand}>{loginCommand(activeEntry)}</code>
-                  <button type="button" className={css.action} data-testid="ext-provider-remove" onClick={() => { const id = activeEntry.instance?.id ?? ''; void removeInstance(id).then((failure) => { if (failure === undefined) openTab('favorites'); else setError(failure) }) }}>{t('providers.remove')}</button>
+                  <button type="button" className={css.action} data-testid="ext-provider-remove" onClick={() => { const id = activeEntry.instance?.id ?? ''; removeInstance(id).then((failure) => { if (failure === undefined) openTab('favorites'); else setError(failure) }, (reason: unknown) => { setError(reason instanceof Error ? reason.message : String(reason)) }) }}>{t('providers.remove')}</button>
+                  {error !== undefined && !adding && <span className={css.error} role="alert" data-testid="ext-provider-remove-error">{error}</span>}
                 </div>
               )}
           <h4 className={css.modelsTitle}>{t('models.title')}</h4>
@@ -238,7 +239,7 @@ export function ProvidersPanel({ t, getDefaultCwd, codexEnabled, rows }: { t: Tr
             )}
         </div>
       </div>
-      {addOpen && <AddProviderDialog taken={entries.map(entry => entry.instance?.id ?? '')} t={t} onAdd={addInstance} onClose={() => { setAddOpen(false) }} />}
+      {addOpen && <AddProviderDialog taken={providers.map(entry => entry.instance?.id ?? '')} t={t} onAdd={addInstance} onClose={() => { setAddOpen(false) }} />}
     </section>
   )
 }

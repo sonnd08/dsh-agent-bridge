@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { claudeExtraArgs, expandHome, parseInstance, splitLaunchArgs } from '../src/instances.ts'
+import { claudeExtraArgs, claudeExtrasOf, codexLaunchOf, expandHome, parseInstance, splitLaunchArgs } from '../src/instances.ts'
 import { draftIdFor, engineOfSession, isDraftId, providerEngine, providerId, providerInstance, providerOfSession, withInstanceId } from '../src/protocol.ts'
 import { isSignedIn } from '../src/run.ts'
 
@@ -66,4 +66,27 @@ test('providers: each provider has a draft id', () => {
   assert.ok(isDraftId('claude:new'))
   assert.equal(isDraftId('codex:@work:abc'), false)
   assert.equal(isDraftId(undefined), false)
+})
+
+test('instances: a Codex instance starts in its own home folder with its arguments', () => {
+  assert.deepEqual(codexLaunchOf({ ...good, home: '~/.c', launchArgs: '--a b', binaryPath: '/bin/own' }, '/bin/default'), { executable: '/bin/own', launch: { env: { CODEX_HOME: join(homedir(), '.c') }, args: ['--a', 'b'] } })
+})
+
+test('instances: a Codex instance with no command uses the configured one', () => {
+  assert.deepEqual(codexLaunchOf(good, '/bin/default'), { executable: '/bin/default', launch: { env: { CODEX_HOME: join(homedir(), '.codex-work') }, args: [] } })
+})
+
+test('instances: a bare command that is not found stays as written, so the start error names it', () => {
+  assert.equal(codexLaunchOf({ ...good, binaryPath: 'no-such-command-here' }, '/bin/default').executable, 'no-such-command-here')
+})
+
+test('instances: a Claude instance uses its folder and its arguments', () => {
+  const item = { ...good, engine: 'claude', home: '/h/claude', launchArgs: '--chrome --model opus', binaryPath: '/bin/own' }
+  assert.deepEqual(claudeExtrasOf(item), { configDir: '/h/claude', extraArgs: { chrome: null, model: 'opus' }, executable: '/bin/own' })
+})
+
+test('instances: a Claude instance with no command names none', () => {
+  const extras = claudeExtrasOf({ ...good, engine: 'claude', home: '/h/claude' })
+  assert.equal('executable' in extras, false)
+  assert.deepEqual(extras.extraArgs, {})
 })

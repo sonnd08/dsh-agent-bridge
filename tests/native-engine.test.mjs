@@ -10,7 +10,7 @@ const reply = (id, provider, text) => ({ id, role: 'assistant', content: [{ type
 const context = id => ({ id, role: 'user', content: [{ type: 'text', text: 'runtime' }], source: { kind: 'runtime-context' } })
 const realTurns = []
 const provider = query => {
-  const host = createEngineHost({ onRealTurn: key => realTurns.push(key), cwdOf: () => '/w', threadOf: () => undefined, saveThread: () => {}, writeHandoff: () => Promise.resolve('/h') })
+  const host = createEngineHost({ authorize: async () => true, onRealTurn: key => realTurns.push(key), cwdOf: () => '/w', threadOf: () => undefined, saveThread: () => {}, writeHandoff: () => Promise.resolve('/h') })
   return { host, adapter: host.adapterFor(claudeDriver({ route: CLAUDE_PROVIDER, query, options: () => ({}), listModels: () => Promise.resolve([]) })), executeProxy: host.executeProxy }
 }
 const system = { id: 's', role: 'system', content: [{ type: 'text', text: 'prompt' }] }

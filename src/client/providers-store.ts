@@ -35,7 +35,10 @@ function load(): void {
   if (requested) return
   requested = true
   void fetch(INSTANCES_PATH, { credentials: 'same-origin' })
-    .then(async response => await response.json() as { instances: ProviderInstanceWire[] })
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+      return await response.json() as { instances: ProviderInstanceWire[] }
+    })
     .then(body => { publish(body.instances) }, (error: unknown) => { requested = false; console.warn('agent-bridge: provider instances failed to load', error) })
 }
 

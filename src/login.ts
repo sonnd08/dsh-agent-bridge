@@ -4,7 +4,9 @@
  * @module dsh-agent-bridge/login
  */
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import type { LoginFlowWire, LoginWire } from './protocol.ts'
+import { resolveCommand } from './commands.ts'
+import { expandHome } from './instances.ts'
+import { providerId, type LoginFlowWire, type LoginWire, type ProviderInstanceWire } from './protocol.ts'
 
 /** Time that the user has to finish a sign-in in the browser. */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000
@@ -33,6 +35,28 @@ export interface EngineLogin {
 export function engineLogin(engine: 'claude' | 'codex', executable: string, home: string | undefined): EngineLogin {
   const folder = home === undefined ? {} : { [engine === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME']: home }
   return { engine, executable, env: { ...process.env, ...folder } }
+}
+
+/** The executables and instances that {@link loginTarget} chooses from. */
+export interface LoginTargetDeps {
+  readonly claudeExecutable: string
+  readonly codexExecutable: string
+  /** @param id - an added instance. @returns the instance; throws when it is unknown. */
+  findInstance(id: string): ProviderInstanceWire
+}
+
+/**
+ * Find how to sign in to a provider.
+ * @param wanted - the engine that the request names.
+ * @param instance - the added instance that the request names.
+ * @param deps - the executables and instances.
+ * @returns the key of the attempt and how to ask the engine; undefined when the engine has no sign-in command.
+ */
+export function loginTarget(wanted: string, instance: string | undefined, deps: LoginTargetDeps): { readonly key: string; readonly login: EngineLogin } | undefined {
+  if (wanted !== 'claude' && wanted !== 'codex') return undefined
+  const item = instance === undefined ? undefined : deps.findInstance(instance)
+  const executable = item?.binaryPath === undefined ? wanted === 'claude' ? deps.claudeExecutable : deps.codexExecutable : resolveCommand(item.binaryPath)
+  return { key: providerId(wanted, instance), login: engineLogin(wanted, executable, item === undefined ? undefined : expandHome(item.home)) }
 }
 
 /**
@@ -95,6 +119,19 @@ function lastLine(output: string): string {
 
 function wire(flow: Flow): LoginFlowWire {
   return { state: flow.state, ...flow.url === undefined ? {} : { url: flow.url }, ...flow.error === undefined ? {} : { error: flow.error } }
+}
+
+/**
+ * Read the state of a provider for a poll. The credentials do not change while the command waits for the browser, so a poll during a running attempt starts no process.
+ * @param flows - the attempts.
+ * @param key - the provider.
+ * @param login - the engine.
+ * @param readStatus - asks the engine about its sign-in.
+ * @returns the sign-in state and the attempt, if there is one.
+ */
+export async function pollLogin(flows: Pick<LoginFlows, 'take'>, key: string, login: EngineLogin, readStatus: (login: EngineLogin) => Promise<Pick<LoginWire, 'signedIn' | 'plan'>> = readLoginStatus): Promise<LoginWire> {
+  const flow = flows.take(key)
+  return { ...flow?.state === 'running' ? {} : await readStatus(login), ...flow === undefined ? {} : { flow } }
 }
 
 /** The sign-in commands that run now, one for each provider. */

@@ -68,3 +68,20 @@ test('model names: a model with no saved level uses Medium when it supports it',
   assert.deepEqual(engineLabels('codex', info, { model: 'a', effort: '' }), { modelId: 'a', label: 'A', effort: 'Medium', effortId: 'medium' })
   assert.equal(engineLabels('codex', info, { model: 'a', effort: 'low' }).effortId, 'low')
 })
+
+test('engine rail: hidden models go away, the stored order applies, and custom models are listed', async () => {
+  const { engineRailModels } = await import('../src/client/model-names.ts')
+  const prefs = { engines: { claude: { hidden: ['hide'], order: ['z', 'keep'], custom: ['my-custom'] } }, favorites: [] }
+  const models = [{ id: 'keep', name: 'Keep' }, { id: 'hide', name: 'Hide' }, { id: 'z', name: 'Z', reasoning: { efforts: [{ id: 'high', name: 'High' }] } }]
+  const rows = engineRailModels('claude', 'Claude Code', models, prefs)
+  assert.deepEqual(rows.map(row => row.id), ['z', 'keep', 'my-custom'])
+  assert.deepEqual(rows[0].efforts, [{ id: 'high', name: 'High' }])
+  assert.equal(rows[2].custom, true)
+  assert.equal(rows[1].description, 'Claude Code')
+})
+
+test('engine rail: a custom id that the catalog has is listed one time', async () => {
+  const { engineRailModels } = await import('../src/client/model-names.ts')
+  const prefs = { engines: { codex: { hidden: [], order: [], custom: ['a'] } }, favorites: [] }
+  assert.deepEqual(engineRailModels('codex', 'Codex', [{ id: 'a', name: 'A' }], prefs).map(row => row.id), ['a'])
+})

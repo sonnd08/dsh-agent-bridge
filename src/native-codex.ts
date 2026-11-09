@@ -153,7 +153,7 @@ export function codexDriver(deps: CodexDriverDeps): EngineDriver {
         stop()
         sink.push({ kind: 'done', error: error instanceof Error ? error.message : String(error) })
       })
-      return { interrupt: async () => { await engine.interrupt(threadId) } }
+      return { interrupt: async () => { if (await engine.interrupt(threadId)) await engine.cleanTerminals(threadId) } }
     },
   }
 }

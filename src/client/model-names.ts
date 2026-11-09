@@ -75,6 +75,21 @@ export function visibleEngineModels(engine: PrefsEngine, info: InfoWire | undefi
 }
 
 /**
+ * The rows of a Claude Code or Codex rail, from the models of the DSH catalog.
+ * @param provider - provider id.
+ * @param label - name of the provider.
+ * @param models - the models of its route in the catalog.
+ * @param prefs - the user's model preferences.
+ * @returns the rows in the stored order, with custom models and without hidden models.
+ */
+export function engineRailModels(provider: PrefsEngine, label: string, models: readonly { readonly id: string; readonly name: string; readonly reasoning?: { readonly efforts: readonly { readonly id: string; readonly name: string }[] } }[], prefs: ModelPrefsWire): EngineModelRow[] {
+  const settings = enginePrefs(prefs, provider)
+  const listed = models.map((model): EngineModelRow => ({ id: model.id, name: model.name, description: label, efforts: model.reasoning?.efforts ?? [] }))
+  const custom = settings.custom.filter(id => !listed.some(row => row.id === id)).map((id): EngineModelRow => ({ id, name: id, description: label, efforts: [], custom: true }))
+  return visibleRows(provider, orderRows([...listed, ...custom], settings.order), prefs)
+}
+
+/**
  * @param provider - provider id.
  * @param rows - the provider's rows.
  * @param prefs - the user's model preferences.
