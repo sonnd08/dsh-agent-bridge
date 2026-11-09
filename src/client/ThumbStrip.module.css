@@ -1,0 +1,57 @@
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.button {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.thumb {
+  display: block;
+  width: 44px;
+  height: 28px;
+  object-fit: cover;
+}
+
+.more {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.zoom {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 70%);
+  cursor: zoom-out;
+}
+
+.zoom img {
+  max-width: 90vw;
+  max-height: 90vh;
+}
+
+/* On the right of the "Completed in" row of a DSH turn. The component sets the top from the row. */
+.onHeader {
+  position: absolute;
+  z-index: 1;
+  right: 0;
+}
+
+/* At the right end of a folded tool row in the session panel. */
+.onRow {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+}

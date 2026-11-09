@@ -4,11 +4,14 @@
  * engine's result, so that DSH draws, stores and forks the work like its own.
  * @module dsh-agent-bridge/native-engine
  */
+import { resultImages } from './claude.ts'
 import type { EngineToolCall } from './engine-access.ts'
+import type { ImageAttachment } from './import-images.ts'
 import { explainTurnError } from './login.ts'
 import type { CanUseTool, Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { renderHandoff, handoffNote } from './handoff.ts'
-import type { BlockWire, EngineName, MessageWire } from './protocol.ts'
+import { ENGINE_TOOL, type BlockWire, type EngineName, type MessageWire } from './protocol.ts'
+import { promptOf } from './run.ts'
 import { composeSwitchPrompt } from './links.ts'
 import { CLAUDE_ROUTE } from './native-routes.ts'
 
@@ -16,8 +19,7 @@ import { CLAUDE_ROUTE } from './native-routes.ts'
 export const CLAUDE_PROVIDER = CLAUDE_ROUTE
 /** Context size that DSH uses for an engine's models. */
 const ENGINE_CONTEXT_WINDOW = 1_000_000
-/** Name of the proxy tool that records an engine's tool calls. */
-export const ENGINE_TOOL = 'engine_tool'
+export { ENGINE_TOOL }
 /** Each DSH turn is one engine process, so work that outlives a turn has no turn to report to. */
 const NO_BACKGROUND_TASKS = 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'
 
@@ -25,7 +27,7 @@ const NO_BACKGROUND_TASKS = 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'
 export interface RequestMessageLike {
   readonly id?: string
   readonly role: string
-  readonly content: readonly { readonly type: string; readonly text?: string; readonly id?: string; readonly name?: string; readonly arguments?: string }[]
+  readonly content: readonly { readonly type: string; readonly text?: string; readonly id?: string; readonly name?: string; readonly arguments?: string; readonly attachment?: ImageAttachment }[]
   readonly source?: { readonly kind?: string; readonly provider?: string }
 }
 
@@ -58,6 +60,10 @@ export interface EngineHostDeps {
   onRealTurn(key: string): void
   /** Applies the permission level of the chat to a call that the engine asks to run. */
   authorize(call: EngineToolCall, exec: ProxyExecution, cwd: string): Promise<boolean>
+  /** Saves images that a tool returned. @returns the reference of each saved image, by `data:` URL. */
+  saveImages?(sources: readonly string[]): Promise<ReadonlyMap<string, ImageAttachment>>
+  /** Reads images that the user attached in a DSH chat. */
+  loadImages?(attachments: readonly ImageAttachment[]): Promise<readonly EngineImage[]>
 }
 
 /** What a Claude Code driver needs from the plugin. */
@@ -101,9 +107,18 @@ export interface EngineTurn {
   readonly thread?: string
   readonly cwd: string
   readonly prompt: string
+  /** Images that the user attached to this turn. */
+  readonly images?: readonly EngineImage[]
   readonly model: string
   readonly effort?: string
   readonly sink: EngineSink
+}
+
+/** An image for an engine turn: Claude Code reads the bytes, and Codex reads the file. */
+export interface EngineImage {
+  readonly mime: string
+  readonly base64: string
+  readonly path: string
 }
 
 /** A running turn. */
@@ -119,8 +134,28 @@ export interface EngineDriver {
   oneShot(prompt: string, model: string): Promise<string>
 }
 
+/** The value that the proxy tool returns to DSH. */
+export interface EngineToolOutput {
+  readonly output: string
+  readonly is_error: boolean
+  readonly images?: readonly ImageAttachment[]
+}
+
+/** A turn that ran outside DSH and that a DSH chat shows as it was written. */
+export interface EngineReplay {
+  readonly user: string
+  readonly assistant: string
+  readonly steps?: readonly {
+    readonly text: string
+    readonly tools: readonly { readonly id: string; readonly name: string; readonly input: unknown; readonly output: string; readonly isError: boolean; readonly attachments?: readonly ImageAttachment[] }[]
+  }[]
+}
+
+/** Text of a last step that had only tool calls, because DSH ends a turn on a reply. */
+const REPLAY_END_TEXT = '(end of turn)'
+
 /** The result of an engine's tool call. */
-export interface ToolOutcome { readonly text: string; readonly isError: boolean }
+export interface ToolOutcome { readonly text: string; readonly isError: boolean; readonly images?: readonly string[] }
 
 class EventQueue {
   private readonly items: RunEvent[] = []
@@ -228,7 +263,10 @@ export function applySdkMessage(message: SDKMessage, run: { readonly queue: { pu
     case 'user': {
       if (message.parent_tool_use_id !== null || typeof message.message.content === 'string') return
       for (const block of message.message.content) {
-        if (block.type === 'tool_result') run.settle(block.tool_use_id, { text: textOfResult(block.content), isError: block.is_error === true })
+        if (block.type === 'tool_result') {
+          const images = resultImages(block.content)
+          run.settle(block.tool_use_id, { text: textOfResult(block.content), isError: block.is_error === true, ...images.length === 0 ? {} : { images } })
+        }
       }
       return
     }
@@ -274,15 +312,17 @@ function wireOf(message: RequestMessageLike, index: number): MessageWire | undef
  * @param hasThread - whether the engine already has a thread for this session.
  * @returns the text the user typed, and the messages that the engine has not seen.
  */
-export function turnInput(messages: readonly RequestMessageLike[], provider: string, hasThread: boolean): { readonly text: string; readonly unseen: readonly MessageWire[] } {
+export function turnInput(messages: readonly RequestMessageLike[], provider: string, hasThread: boolean): { readonly text: string; readonly unseen: readonly MessageWire[]; readonly images?: readonly ImageAttachment[] } {
   const lastReply = messages.findLastIndex(message => message.role === 'assistant')
-  const text = messages.slice(lastReply + 1).filter(isTyped).map(typedText).filter(part => part !== '').join('\n\n')
+  const typed = messages.slice(lastReply + 1).filter(isTyped)
+  const text = typed.map(typedText).filter(part => part !== '').join('\n\n')
+  const images = typed.flatMap(message => message.content.flatMap(block => block.type === 'image' && block.attachment !== undefined ? [block.attachment] : []))
   const lastOwn = hasThread ? messages.findLastIndex(message => message.role === 'assistant' && message.source?.provider === provider) : -1
   const unseen = messages.slice(lastOwn + 1, lastReply + 1).flatMap((message, index) => {
     const wire = wireOf(message, index)
     return wire === undefined ? [] : [wire]
   })
-  return { text, unseen }
+  return { text, unseen, ...images.length === 0 ? {} : { images } }
 }
 
 /** The fields of a DSH tool execution that the proxy reads. */
@@ -298,13 +338,13 @@ export function claudeDriver(deps: ClaudeDriverDeps): EngineDriver {
     route: deps.route,
     name: 'Claude Code',
     listModels: () => deps.listModels(),
-    begin: ({ thread, cwd, prompt, model, effort, sink }) => {
+    begin: ({ thread, cwd, prompt, images, model, effort, sink }) => {
       const canUseTool: CanUseTool = async (_tool, input, context) => await sink.approve(context.toolUseID)
         ? { behavior: 'allow', updatedInput: input }
         : { behavior: 'deny', message: 'The user denied this tool call.' }
       const base = deps.options({ ...thread === undefined ? {} : { thread }, cwd, text: prompt, model, ...effort === undefined ? {} : { effort } })
       const query = deps.query({
-        prompt,
+        prompt: promptOf({ text: prompt, images: images?.map(({ mime, base64 }) => ({ mime, base64 })) ?? [] }),
         options: { ...base, env: { ...base.env ?? process.env, [NO_BACKGROUND_TASKS]: '1' }, permissionMode: 'default', includePartialMessages: true, canUseTool, disallowedTools: [...base.disallowedTools ?? [], 'AskUserQuestion'] },
       })
       const target = { queue: { push: (event: RunEvent) => { sink.push(event) } }, settle: (id: string, outcome: ToolOutcome) => { sink.settle(id, outcome) } }
@@ -341,13 +381,14 @@ export function claudeDriver(deps: ClaudeDriverDeps): EngineDriver {
  */
 export function createEngineHost(deps: EngineHostDeps): {
   adapterFor: (driver: EngineDriver) => Record<string, unknown>
-  armReplay: (key: string, replay: { readonly user: string; readonly assistant: string }) => void
+  armReplay: (key: string, replay: EngineReplay) => void
   isActive: (key: string) => boolean
-  executeProxy: (args: unknown, exec: ProxyExecution) => Promise<{ output: string; is_error: boolean }>
+  executeProxy: (args: unknown, exec: ProxyExecution) => Promise<EngineToolOutput>
 } {
   const active = new Map<string, EngineRun>()
   const toolRuns = new Map<string, EngineRun>()
-  const replays = new Map<string, { readonly user: string; readonly assistant: string }>()
+  const replays = new Map<string, EngineReplay & { next: number }>()
+  const recorded = new Map<string, EngineToolOutput>()
   const keyOf = (sessionId: string, provider: string): string => `${sessionId}|${provider}`
 
   const stopRun = (run: EngineRun): void => {
@@ -357,7 +398,8 @@ export function createEngineHost(deps: EngineHostDeps): {
 
   const start = async (driver: EngineDriver, request: EngineRequest, sessionId: string, key: string): Promise<EngineRun> => {
     const thread = deps.threadOf(key)
-    const { text, unseen } = turnInput(request.messages, request.provider, thread !== undefined)
+    const { text, unseen, images } = turnInput(request.messages, request.provider, thread !== undefined)
+    const attached = images === undefined ? [] : await deps.loadImages?.(images) ?? []
     let prompt = text
     if (unseen.length > 0) {
       const handoff = renderHandoff('previous model' as EngineName, unseen, false)
@@ -368,6 +410,7 @@ export function createEngineHost(deps: EngineHostDeps): {
       ...thread === undefined ? {} : { thread },
       cwd: deps.cwdOf(sessionId),
       prompt,
+      ...attached.length === 0 ? {} : { images: attached },
       model: request.model,
       ...request.reasoningEffort === undefined ? {} : { effort: request.reasoningEffort },
       sink: {
@@ -391,6 +434,33 @@ export function createEngineHost(deps: EngineHostDeps): {
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 
+  /** Show the next step of a turn from outside DSH. Its tool calls take their recorded results, and nothing runs again. */
+  function* replayStep(key: string, replay: EngineReplay & { next: number }): Generator<EngineChunk> {
+    const step = (replay.steps ?? [{ text: replay.assistant, tools: [] }])[replay.next]
+    replay.next += 1
+    const text = step?.text ?? REPLAY_END_TEXT
+    const tools = step?.tools ?? []
+    let index = 0
+    if (text !== '') {
+      yield { type: 'block-start', index, blockType: 'text' }
+      yield { type: 'text-delta', index, text }
+      yield { type: 'block-end', index, block: { type: 'text', text } }
+      index += 1
+    }
+    if (tools.length === 0) {
+      replays.delete(key)
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    for (const tool of tools) {
+      recorded.set(tool.id, { output: tool.output, is_error: tool.isError, ...tool.attachments === undefined ? {} : { images: tool.attachments } })
+      yield { type: 'block-start', index, blockType: 'tool-call' }
+      yield { type: 'block-end', index, block: { type: 'tool-call', id: tool.id, name: ENGINE_TOOL, arguments: JSON.stringify({ tool: tool.name, input: tool.input }) } }
+      index += 1
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+
   async function* stream(driver: EngineDriver, request: EngineRequest): AsyncGenerator<EngineChunk> {
     if (request.purpose !== undefined || request.sessionId === undefined) {
       yield* oneShot(driver, request)
@@ -398,14 +468,14 @@ export function createEngineHost(deps: EngineHostDeps): {
     }
     const key = keyOf(request.sessionId, request.provider)
     const replay = replays.get(key)
-    replays.delete(key)
-    // A turn that already ran outside DSH is shown as it was written: the engine must not answer it again.
-    if (replay !== undefined && turnInput(request.messages, request.provider, true).text === replay.user) {
-      yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: replay.assistant }
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: replay.assistant } }
-      yield { type: 'finish', reason: { kind: 'stop' } }
-      return
+    if (replay !== undefined) {
+      // A turn that already ran outside DSH is shown as it was written: the engine must not answer it again.
+      const input = turnInput(request.messages, request.provider, true).text
+      if (replay.next === 0 ? input === replay.user : input === '') {
+        yield* replayStep(key, replay)
+        return
+      }
+      replays.delete(key)
     }
     const existing = active.get(key)
     if (existing !== undefined) existing.denyWaiting()
@@ -482,7 +552,12 @@ export function createEngineHost(deps: EngineHostDeps): {
     }
   }
 
-  const executeProxy = async (args: unknown, exec: ProxyExecution): Promise<{ output: string; is_error: boolean }> => {
+  const executeProxy = async (args: unknown, exec: ProxyExecution): Promise<EngineToolOutput> => {
+    const saved = recorded.get(exec.rootCallId)
+    if (saved !== undefined) {
+      recorded.delete(exec.rootCallId)
+      return saved
+    }
     const run = toolRuns.get(exec.rootCallId)
     toolRuns.delete(exec.rootCallId)
     if (run === undefined) return { output: 'This tool only records calls that another engine already made. Do not call it.', is_error: true }
@@ -497,7 +572,12 @@ export function createEngineHost(deps: EngineHostDeps): {
       else exec.signal.addEventListener('abort', onAbort, { once: true })
     })
     const outcome = await Promise.race([run.outcome(exec.rootCallId), stopped])
-    return { output: outcome.text, is_error: outcome.isError }
+    const stored = outcome.images === undefined ? undefined : await deps.saveImages?.(outcome.images).catch(() => undefined)
+    const images = outcome.images?.flatMap((source) => {
+      const attachment = stored?.get(source)
+      return attachment === undefined ? [] : [attachment]
+    }) ?? []
+    return { output: outcome.text, is_error: outcome.isError, ...images.length === 0 ? {} : { images } }
   }
 
   const adapterFor = (driver: EngineDriver): Record<string, unknown> => {
@@ -524,5 +604,5 @@ export function createEngineHost(deps: EngineHostDeps): {
     }
   }
 
-  return { adapterFor, armReplay: (key, replay) => { replays.set(key, replay) }, isActive: key => active.has(key), executeProxy }
+  return { adapterFor, armReplay: (key, replay) => { replays.set(key, { ...replay, next: 0 }) }, isActive: key => active.has(key), executeProxy }
 }

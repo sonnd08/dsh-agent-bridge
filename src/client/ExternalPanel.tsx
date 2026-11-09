@@ -12,7 +12,7 @@ import { ProviderPicker, type PickerEngine } from './ProviderPicker.tsx'
 import { isDraft, type TranscriptController, type TranscriptState } from './transcript.ts'
 import type { SessionsSnapshot } from './sessions.ts'
 import { IconAlarm, IconArchive, IconBranch, IconCopy, IconEdit, IconMore, IconSearch, IconTrash } from './icons.tsx'
-import { Markdown, Thinking, Todos, ToolCard, ToolRunRow } from './ToolCard.tsx'
+import { ChatImage, Markdown, Thinking, Todos, ToolCard, ToolRunRow } from './ToolCard.tsx'
 import { foldToolRuns } from './tool-runs.ts'
 import { buildTimeline } from './timeline.ts'
 import { AttachmentChips, ComposerBar, SlashMenu, toAttachments, useChoices } from './ComposerBar.tsx'
@@ -437,6 +437,7 @@ export function ExternalPanel({ t, useSelection, useTranscript, controller, star
                       case 'run': return <ToolRunRow key={item.id} run={item} t={t} running={transcript.running} active={transcript.running && message === timeline.at(-1) && index === message.items.length - 1} />
                       case 'text': return <div key={index} data-testid="ext-text"><Markdown text={item.text} t={t} /></div>
                       case 'thinking': return <Thinking key={index} text={item.text} t={t} />
+                      case 'image': return <ChatImage key={index} src={item.src} t={t} />
                       case 'todos': return <Todos key={index} todos={item.todos} />
                       case 'tool': return <ToolCard key={index} item={item} t={t} running={transcript.running} />
                     }

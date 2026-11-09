@@ -130,7 +130,7 @@ function summarizeInput(input: unknown): string {
 /** Longest string kept in structured tool arguments. */
 const ARG_STRING_LIMIT = 20_000
 
-function capStrings(value: unknown): unknown {
+export function capStrings(value: unknown): unknown {
   if (typeof value === 'string') return value.length > ARG_STRING_LIMIT ? `${value.slice(0, ARG_STRING_LIMIT)}…` : value
   if (Array.isArray(value)) return value.map(capStrings)
   if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, capStrings(item)]))
@@ -151,10 +151,18 @@ function resultText(content: unknown): string {
     .map((part: { type?: string; text?: string }) => part.type === 'text' ? part.text ?? '' : `[${part.type ?? 'unknown'}]`).join('\n')
 }
 
-function resultImages(content: unknown): string[] {
+/** @param part - one image block of the Claude API. @returns the image as a `data:` URL; undefined when the block holds no bytes. */
+function imageUrl(part: { source?: { type?: string; media_type?: string; data?: string } }): string | undefined {
+  return part.source?.type === 'base64' ? `data:${part.source.media_type ?? 'image/png'};base64,${part.source.data ?? ''}` : undefined
+}
+
+/** @param content - the content of a tool result. @returns its images as `data:` URLs. */
+export function resultImages(content: unknown): string[] {
   if (!Array.isArray(content)) return []
-  return content.flatMap((part: { type?: string; source?: { type?: string; media_type?: string; data?: string } }) =>
-    part.type === 'image' && part.source?.type === 'base64' ? [`data:${part.source.media_type ?? 'image/png'};base64,${part.source.data ?? ''}`] : [])
+  return content.flatMap((part: { type?: string; source?: { type?: string; media_type?: string; data?: string } }) => {
+    const url = part.type === 'image' ? imageUrl(part) : undefined
+    return url === undefined ? [] : [url]
+  })
 }
 
 function toBlocks(content: unknown): BlockWire[] {
@@ -193,6 +201,12 @@ function toBlocks(content: unknown): BlockWire[] {
             ...part['is_error'] === true ? { isError: true } : {},
           })
         }
+        break
+      case 'image':
+      {
+        const src = imageUrl(part as { source?: { type?: string; media_type?: string; data?: string } })
+        blocks.push(src === undefined ? { type: 'text', text: '[image]' } : { type: 'image', src })
+      }
         break
       default:
         blocks.push({ type: 'text', text: `[${String(part['type'])}]` })

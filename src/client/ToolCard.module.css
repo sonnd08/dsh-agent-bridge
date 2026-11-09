@@ -73,6 +73,10 @@
   text-decoration: line-through;
 }
 
+.tool {
+  position: relative;
+}
+
 .thumb {
   max-width: 320px;
   max-height: 200px;

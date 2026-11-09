@@ -34,7 +34,8 @@ import { startHeapWatch } from './diagnostics.ts'
 import { createSingleFlight } from './single-flight.ts'
 import { parseModelPrefs } from './model-prefs.ts'
 import { completedPrefix, forkedLink, mergeUnlistedForks } from './fork.ts'
-import { allTurns, importEvents, type SeedEvent } from './dsh-import.ts'
+import { allTurns, importEvents, importImageSources, type ImportStep, type SeedEvent } from './dsh-import.ts'
+import { parseImageData, saveImages, type ImageAttachment, type ImageToSave } from './import-images.ts'
 import { BranchStatusReader } from './branch-status.ts'
 import { handoffFileName, handoffNote, renderHandoff } from './handoff.ts'
 import { claudeDriver, createEngineHost, ENGINE_TOOL, type EngineModel, type ProxyExecution } from './native-engine.ts'
@@ -278,6 +279,12 @@ export function apply(ctx: Context, config: Config): void {
   }
   let syncNativeRoutes = (): void => {}
   let nativeHost: Pick<ReturnType<typeof createEngineHost>, 'armReplay' | 'isActive'> | undefined
+  const attachmentStore = () => ctx.get('attachments' as never) as unknown as { saveImage(input: ImageToSave): Promise<ImageAttachment>; readImage(ref: ImageAttachment): Promise<{ ref: ImageAttachment; data: Uint8Array }> } | undefined
+  /** Save images in the DSH attachment store. Without a store, the chat keeps a short note for each image. */
+  const storeImages = async (sources: readonly string[]): Promise<ReadonlyMap<string, ImageAttachment>> => {
+    const store = attachmentStore()
+    return store === undefined ? new Map() : await saveImages(sources, image => store.saveImage(image))
+  }
   const store = new StateStore(process.env['AGENT_BRIDGE_STATE'] ?? defaultStatePath(), defaultStatePath('external-engines'))
   // Claude Code needs the folder to exist before it can be allowed to read it.
   void mkdir(handoffDir(), { recursive: true, mode: 0o700 }).catch((error: unknown) => { console.warn('agent-bridge: conversation folder failed', error) })
@@ -514,6 +521,14 @@ export function apply(ctx: Context, config: Config): void {
       readonly agents: { get(id: string): { readonly session: { readonly header: { readonly cwd?: string } } } | undefined }
     }
     const host = createEngineHost({
+      saveImages: storeImages,
+      loadImages: async (attachments) => {
+        const store = attachmentStore()
+        if (store === undefined) return []
+        const stored = await Promise.all(attachments.map(attachment => store.readImage(attachment)))
+        const prepared = await prepareAttachments(stored.map(({ ref, data }, index) => ({ name: `image-${String(index)}`, mime: String(ref['mediaType']), base64: Buffer.from(data).toString('base64') })))
+        return prepared.images.map((image, index) => ({ ...image, path: prepared.imagePaths[index] as string }))
+      },
       authorize: (call, exec, cwd) => {
         const session = exec.agent?.session
         const approval = ctx.get('approval' as never) as unknown as { readonly config: { readonly policy?: string }; overrideOf(session: unknown): string | undefined; request(request: unknown): Promise<string> } | undefined
@@ -581,8 +596,11 @@ export function apply(ctx: Context, config: Config): void {
       description: 'Internal record of a tool call that another coding engine already made. Never call this tool.',
       parameters: { type: 'object', properties: { tool: { type: 'string' }, input: {} }, required: ['tool'] },
       output: {
-        schema: { type: 'object', properties: { output: { type: 'string' }, is_error: { type: 'boolean' } }, required: ['output', 'is_error'] },
-        render: (_args: unknown, value: { output: string; is_error: boolean }) => [{ type: 'text', text: value.is_error ? `Error: ${value.output}` : value.output }],
+        schema: { type: 'object', properties: { output: { type: 'string' }, is_error: { type: 'boolean' }, images: { type: 'array', items: { type: 'object' } } }, required: ['output', 'is_error'] },
+        render: (_args: unknown, value: { output: string; is_error: boolean; images?: readonly ImageAttachment[] }) => [
+          { type: 'text', text: value.is_error ? `Error: ${value.output}` : value.output },
+          ...(value.images ?? []).map(attachment => ({ type: 'image', attachment })),
+        ],
       },
       execute: (args: unknown, exec: ProxyExecution) => host.executeProxy(args, exec),
     }), 'agent-bridge: engine tool proxy')
@@ -608,6 +626,17 @@ export function apply(ctx: Context, config: Config): void {
     // An agent lives as long as its creator, and this plugin can reload at any time. The stored session is loaded by the DSH session controller on the next call.
     await handle.dispose()
     return sessionId
+  }
+  /** The tool calls of a turn from outside DSH, with their images saved. */
+  const replaySteps = async (steps: readonly ImportStep[]) => {
+    const saved = await storeImages(steps.flatMap(step => step.tools.flatMap(tool => tool.images ?? [])))
+    return steps.map(step => ({
+      text: step.text,
+      tools: step.tools.map((tool) => {
+        const attachments = (tool.images ?? []).flatMap((src) => { const attachment = saved.get(src); return attachment === undefined ? [] : [attachment] })
+        return { id: tool.id, name: tool.name, input: tool.input, output: tool.output, isError: tool.isError, ...attachments.length === 0 ? {} : { attachments } }
+      }),
+    }))
   }
   let mirrorRun: Promise<MirrorSyncWire> | undefined
   const mirrorChecked = new Map<string, number>()
@@ -650,7 +679,7 @@ export function apply(ctx: Context, config: Config): void {
         const route = selection.provider
         const { messages } = await conversationMessages(parsed, true)
         const clean = withoutCatchup(messages)
-        const seed = importEvents(clean, selection, now)
+        const seed = importEvents(clean, selection, now, await storeImages(importImageSources(clean)))
         if (seed.length === 0) {
           mirrorChecked.set(row.id, row.updatedAt)
           continue
@@ -666,9 +695,12 @@ export function apply(ctx: Context, config: Config): void {
       if (nativeHost === undefined || !mirrorNeedsRead(entry, { updatedAt: row.updatedAt, quiet, active: nativeHost.isActive(key), currentRoute: ready[entry.sessionId] })) continue
       const turns = allTurns(withoutCatchup((await conversationMessages(parsed, true)).messages))
       const plan = planMirror(entry, turns, quiet, row.updatedAt)
-      if (plan.replay !== undefined) nativeHost.armReplay(key, { user: plan.replay.user, assistant: plan.replay.assistant })
+      if (plan.replay !== undefined) nativeHost.armReplay(key, { user: plan.replay.user, assistant: plan.replay.assistant, ...plan.replay.steps === undefined ? {} : { steps: await replaySteps(plan.replay.steps) } })
       if (plan.entry !== undefined) store.set('mirrors', { ...store.get('mirrors'), [row.id]: plan.entry })
-      if (plan.replay !== undefined) replays.push({ sessionId: entry.sessionId, user: plan.replay.user })
+      if (plan.replay !== undefined) {
+        const images = (plan.replay.images ?? []).flatMap((src) => { const image = parseImageData(src); return image === undefined ? [] : [image] })
+        replays.push({ sessionId: entry.sessionId, user: plan.replay.user, ...images.length === 0 ? {} : { images } })
+      }
       more = more || plan.more
     }
     return { created, replays, more }
@@ -685,7 +717,8 @@ export function apply(ctx: Context, config: Config): void {
     if (dshHost() === undefined) return json({ error: 'this DSH build has no agent service' }, 501)
     const { messages } = await conversationMessages(parsed)
     const selection = { provider: body.provider, model: body.model, ...body.effort === undefined || body.effort === '' ? {} : { reasoningEffort: body.effort } }
-    const seed = importEvents(withoutCatchup(messages), selection, Date.now())
+    const cleanMessages = withoutCatchup(messages)
+    const seed = importEvents(cleanMessages, selection, Date.now(), await storeImages(importImageSources(cleanMessages)))
     if (seed.length === 0) return json({ error: 'this conversation has no text to import' }, 422)
     return json({ sessionId: await createImported(seed, selection, body.cwd) })
   }, 'dsh import', 'POST')

@@ -8,6 +8,7 @@ type ToolResult = Extract<BlockWire, { type: 'tool_result' }>
 export type TimelineItem =
   | { readonly kind: 'text'; readonly text: string }
   | { readonly kind: 'thinking'; readonly text: string }
+  | { readonly kind: 'image'; readonly src: string }
   | { readonly kind: 'todos'; readonly todos: readonly TodoWire[] }
   | { readonly kind: 'tool'; readonly use: ToolUse | undefined; readonly result: ToolResult | undefined }
 
@@ -50,6 +51,9 @@ export function buildTimeline(messages: readonly MessageWire[]): TimelineMessage
           break
         case 'thinking':
           items.push({ kind: 'thinking', text: block.text })
+          break
+        case 'image':
+          items.push({ kind: 'image', src: block.src })
           break
         case 'tool_use':
           items.push(block.todos === undefined
