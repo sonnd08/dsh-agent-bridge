@@ -4,7 +4,9 @@
  * and a change feed for the transcript file.
  * @module dsh-agent-bridge
  */
-import { engineLogin, LoginFlows, readLoginStatus, type EngineLogin } from './login.ts'
+import { authorizeEngineCall } from './engine-access.ts'
+import { loginTarget, LoginFlows, pollLogin, readLoginStatus, type EngineLogin } from './login.ts'
+import { dropCachedInfo, infoCachePrefix, infoEngine, parseId, prefixed, type EngineId } from './engine-id.ts'
 import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { execFile } from 'node:child_process'
@@ -39,16 +41,14 @@ import { claudeDriver, createEngineHost, ENGINE_TOOL, type EngineModel, type Pro
 import { codexDriver } from './native-codex.ts'
 import { routeOf } from './native-routes.ts'
 import { lastUsedModel } from './used-model.ts'
-import { isQuiet, nextReplay } from './mirror.ts'
+import { hasTurnSince, historyTurnLimit, importSelection, importStep, isQuiet, markResync, mirrorNeedsRead, nativeThreadRowIds, planMirror } from './mirror.ts'
 import { choiceFromUsed } from './client/model-names.ts'
 import { engineCatalog, visibleRows } from './client/model-names.ts'
 
 /** Chats read for import in each engine; the session list limit applies if it is higher. */
 const MIRROR_LIST_LIMIT = 300
-/** Most chats imported by one call. */
-const MIRROR_IMPORTS_PER_SYNC = 5
 import { DEFAULT_EFFORT } from './model-prefs.ts'
-import { claudeExtraArgs, expandHome, parseInstance, splitLaunchArgs } from './instances.ts'
+import { claudeExtrasOf, codexLaunchOf, expandHome, parseInstance } from './instances.ts'
 import { cleanTitle, composeSwitchPrompt, hiddenThreadIds, stripCatchup, isCommand, linkOf, mergeLinkedMessages, planSwitch, readableCatchup, recordSwitch, removeThread, renderCatchup, withoutCatchup, type ThreadLink } from './links.ts'
 import { changeSkill, defaultStatePath, listSkills, mcpChange, prepareAttachments, readGitConfig, Scheduler, StateStore, writeGitConfig, handoffDir } from './extras.ts'
 import {
@@ -56,7 +56,7 @@ import {
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  LOGIN_PATH, type LoginBodyWire, type LoginWire, ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, MIRROR_PATH, type MirrorSyncWire, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  LOGIN_PATH, type LoginBodyWire, type LoginWire, ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, MIRROR_PATH, type MirrorSyncWire, INSTANCES_PATH, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -64,7 +64,7 @@ import {
   CLONE_PATH, GIT_WORKTREES_PATH, SCHEDULE_PATH, type ScheduleBodyWire, type WorktreeBodyWire,
   GIT_COMPARE_PATH, GIT_MESSAGE_PATH, GIT_REMOTE_PATH, GIT_SHOW_PATH,
   TERM_CLOSE_PATH, TERM_INPUT_PATH, TERM_OPEN_PATH, TERM_RESIZE_PATH, TERM_STREAM_PATH, type GitActionWire, type TermEventWire,
-  CLAUDE_ID_PREFIX, CODEX_ID_PREFIX, PI_ID_PREFIX, type EngineName, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, SCREEN_STATUS_PATH, SEND_PATH, SESSIONS_PATH, SESSION_PATH, WATCH_PATH,
+  type EngineName, INTERRUPT_PATH, LIVE_PATH, MANAGE_PATH, SCREEN_STATUS_PATH, SEND_PATH, SESSIONS_PATH, SESSION_PATH, WATCH_PATH,
   type AnswerBodyWire, type GoalWire, type LiveEventWire, type ManageBodyWire, type MessageWire, type SessionRowWire, type SendBodyWire, type SessionWire,
 } from './protocol.ts'
 
@@ -170,39 +170,14 @@ function json(body: unknown, status = 200): Response {
   })
 }
 
-/** An external session id split into its engine and the engine's own id. */
-interface EngineId {
-  readonly engine: EngineName
-  readonly raw: string
-  /** Added provider instance, when the session belongs to one. */
-  readonly instance?: string
-}
-
-function parseId(id: string): EngineId | undefined {
-  const split = (engine: EngineName, rest: string): EngineId => {
-    const instance = instanceOfSession(id)
-    return instance === undefined ? { engine, raw: rest } : { engine, raw: rest.slice(instance.length + 2), instance }
-  }
-  if (id.startsWith(CLAUDE_ID_PREFIX)) return split('claude', id.slice(CLAUDE_ID_PREFIX.length))
-  if (id.startsWith(CODEX_ID_PREFIX)) return split('codex', id.slice(CODEX_ID_PREFIX.length))
-  if (id.startsWith(PI_ID_PREFIX)) return split('pi', id.slice(PI_ID_PREFIX.length))
-  return undefined
-}
-
 function idOf(request: Request): EngineId | undefined {
   return parseId(new URL(request.url, 'http://host').searchParams.get('id') ?? '')
 }
 
-const ID_PREFIXES: Readonly<Record<EngineName, string>> = { claude: CLAUDE_ID_PREFIX, codex: CODEX_ID_PREFIX, pi: PI_ID_PREFIX }
-
-function prefixed(engine: EngineName, raw: string, instance?: string): string {
-  const id = `${ID_PREFIXES[engine]}${raw}`
-  return instance === undefined ? id : withInstanceId(id, instance)
-}
-
 /** What the routes need from an engine; each engine provides one. */
 interface Driver {
-  readMessages(id: string): Promise<{ messages: MessageWire[]; recentTurns?: number }>
+  /** @param full - read the whole chat and not only the recent part that a panel shows. */
+  readMessages(id: string, full?: boolean): Promise<{ messages: MessageWire[]; recentTurns?: number }>
   readGoal(id: string): Promise<GoalWire | undefined>
   findFile(id: string): Promise<string | undefined>
   subscribe(id: string, subscriber: (event: LiveEventWire) => void): () => void
@@ -318,16 +293,15 @@ export function apply(ctx: Context, config: Config): void {
     if (instance === undefined) return codex()
     const known = codexEngines.get(instance)
     if (known !== undefined) return known
-    const item = requireInstance(instance)
-    const engine = new CodexEngine(item.binaryPath === undefined ? current().codexExecutable : resolveCommand(item.binaryPath), { env: { CODEX_HOME: expandHome(item.home) }, args: splitLaunchArgs(item.launchArgs) })
+    const { executable, launch } = codexLaunchOf(requireInstance(instance), current().codexExecutable)
+    const engine = new CodexEngine(executable, launch)
     codexEngines.set(instance, engine)
     return engine
   }
   /** What a Claude turn or probe of an added instance needs. */
   const claudeExtras = (instance: string | undefined): Pick<TurnOptions, 'configDir' | 'extraArgs'> & { readonly executable?: string } => {
     if (instance === undefined) return {}
-    const item = requireInstance(instance)
-    return { configDir: expandHome(item.home), extraArgs: claudeExtraArgs(item.launchArgs), ...item.binaryPath === undefined ? {} : { executable: resolveCommand(item.binaryPath) } }
+    return claudeExtrasOf(requireInstance(instance))
   }
   const claudeHome = (instance: string | undefined): string | undefined => instance === undefined ? undefined : expandHome(requireInstance(instance).home)
   const terminals = new TerminalManager()
@@ -358,8 +332,8 @@ export function apply(ctx: Context, config: Config): void {
     delete: id => deleteClaudeSession(id, home),
   })
   const makeCodexDriver = (engine: () => CodexEngine): Driver => ({
-    readMessages: async (id) => {
-      const turns = current().codexHistoryTurns
+    readMessages: async (id, full) => {
+      const turns = historyTurnLimit(full === true, current().codexHistoryTurns)
       const page = await engine().readMessages(id, turns)
       return { messages: page.messages, ...page.earlierOmitted ? { recentTurns: turns } : {} }
     },
@@ -452,13 +426,7 @@ export function apply(ctx: Context, config: Config): void {
     const saved = store.get('unlistedForks')
     const { rows: all, unlisted } = mergeUnlistedForks([...await listClaudeRows(settings.sessionLimit), ...codexRows, ...piRows, ...instanceRows], saved)
     if (unlisted.length !== saved.length) store.set('unlistedForks', unlisted)
-    // A native chat is listed by DSH, so the engine thread behind it must not get a row too.
-    const hidden = new Set([...hiddenThreadIds(store.get('links')), ...Object.entries(store.get('engineThreads')).flatMap(([key, thread]) => {
-      const route = key.split('|')[1] ?? ''
-      const instance = store.get('instances').find(item => item.id === route)
-      const plain = [`${CLAUDE_ID_PREFIX}${thread}`, `${CODEX_ID_PREFIX}${thread}`]
-      return instance === undefined ? plain : plain.map(id => withInstanceId(id, instance.id))
-    })])
+    const hidden = new Set([...hiddenThreadIds(store.get('links')), ...nativeThreadRowIds(store.get('engineThreads'), store.get('instances'))])
     const rows = all.filter(row => archived.has(row.id) === wantArchived && !hidden.has(row.id)).map(row => ({ ...row, title: cleanTitle(row.title) })).sort((a, b) => b.updatedAt - a.updatedAt)
     const running = rows.filter((row) => {
       const parsed = parseId(row.id)
@@ -517,8 +485,8 @@ export function apply(ctx: Context, config: Config): void {
     }
     return forks[id] ?? id
   }
-  const conversationMessages = async (parsed: EngineId): Promise<{ readonly messages: readonly MessageWire[]; readonly partial: boolean }> => {
-    const page = await driverOf(parsed.engine, parsed.instance).readMessages(parsed.raw)
+  const conversationMessages = async (parsed: EngineId, full = false): Promise<{ readonly messages: readonly MessageWire[]; readonly partial: boolean }> => {
+    const page = await driverOf(parsed.engine, parsed.instance).readMessages(parsed.raw, full)
     const sessionId = prefixed(parsed.engine, parsed.raw, parsed.instance)
     const link = linkOf(store.get('links'), sessionId)
     return { messages: link === undefined ? page.messages : mergeLinkedMessages(link, sessionId, await linkedThreads(link, sessionId, page.messages)), partial: page.recentTurns !== undefined }
@@ -546,11 +514,23 @@ export function apply(ctx: Context, config: Config): void {
       readonly agents: { get(id: string): { readonly session: { readonly header: { readonly cwd?: string } } } | undefined }
     }
     const host = createEngineHost({
+      authorize: (call, exec, cwd) => {
+        const session = exec.agent?.session
+        const approval = ctx.get('approval' as never) as unknown as { readonly config: { readonly policy?: string }; overrideOf(session: unknown): string | undefined; request(request: unknown): Promise<string> } | undefined
+        const sandbox = ctx.get('sandboxPolicy' as never) as unknown as { resolve(request: { session: unknown }): { readonly mode: string } } | undefined
+        return authorizeEngineCall({
+          trustedFolder: handoffDir(),
+          modeOf: () => session === undefined ? undefined : sandbox?.resolve({ session }).mode,
+          policyOf: () => session === undefined ? undefined : approval?.overrideOf(session) ?? approval?.config.policy ?? 'ask',
+          ask: (reason) => {
+            if (approval === undefined || exec.agent === undefined) throw new Error('this DSH build has no approval service')
+            return approval.request({ agent: exec.agent, toolName: call.tool, ...exec.callId === undefined ? {} : { callId: exec.callId }, reason, signal: exec.signal })
+          },
+        }, call, cwd)
+      },
       onRealTurn: (key) => {
-        const [sessionId, route] = key.split('|')
-        const mirrors = store.get('mirrors')
-        const found = Object.entries(mirrors).find(([, entry]) => entry.sessionId === sessionId && entry.route === route)
-        if (found !== undefined) store.set('mirrors', { ...mirrors, [found[0]]: { ...found[1], resync: true } })
+        const marked = markResync(store.get('mirrors'), key)
+        if (marked !== undefined) store.set('mirrors', marked)
       },
       cwdOf: sessionId => services.agents.get(sessionId)?.session.header.cwd ?? homedirOf(current()),
       threadOf: key => store.get('engineThreads')[key],
@@ -656,54 +636,40 @@ export function apply(ctx: Context, config: Config): void {
       const quiet = isQuiet(row.updatedAt, now) && !driver.isRunning(parsed.raw)
       const entry = store.get('mirrors')[row.id]
       if (entry === undefined) {
-        if (!quiet) continue
-        // A file time can change with no new turn, so the time of the last turn decides.
-        if (row.updatedAt <= since || mirrorChecked.get(row.id) === row.updatedAt || owned.has(parsed.raw)) continue
-        if (row.cwd === '' || statSync(row.cwd, { throwIfNoEntry: false })?.isDirectory() !== true) continue
-        if (imports >= MIRROR_IMPORTS_PER_SYNC) { more = true; continue }
+        const step = importStep({ quiet, updatedAt: row.updatedAt, since, lastChecked: mirrorChecked.get(row.id), owned: owned.has(parsed.raw), cwd: row.cwd, imports, isFolder: cwd => statSync(cwd, { throwIfNoEntry: false })?.isDirectory() === true })
+        if (step === 'more') more = true
+        if (step !== 'read') continue
         const file = await driver.findFile(parsed.raw)
         const used = file === undefined ? undefined : await lastUsedModel(parsed.engine, file)
-        if (used?.at === undefined || used.at <= since) {
+        if (!hasTurnSince(used, since)) {
+          mirrorChecked.set(row.id, row.updatedAt)
+          continue
+        }
+        const info = await readInfo(settings, parsed.engine, parsed.instance, row.cwd, false).catch(() => undefined)
+        const selection = importSelection(parsed.engine, parsed.instance, choiceFromUsed(used, info))
+        const route = selection.provider
+        const { messages } = await conversationMessages(parsed, true)
+        const clean = withoutCatchup(messages)
+        const seed = importEvents(clean, selection, now)
+        if (seed.length === 0) {
           mirrorChecked.set(row.id, row.updatedAt)
           continue
         }
         imports += 1
-        const provider = parsed.instance ?? parsed.engine
-        const route = routeOf(provider)
-        const info = await readInfo(settings, parsed.engine, parsed.instance, row.cwd, false).catch(() => undefined)
-        const choice = choiceFromUsed(used, info)
-        const selection = { provider: route, model: choice.model, ...choice.effort === '' ? {} : { reasoningEffort: choice.effort } }
-        const { messages } = await conversationMessages(parsed)
-        const clean = withoutCatchup(messages)
-        const seed = importEvents(clean, selection, now)
-        if (seed.length === 0) continue
         const sessionId = await createImported(seed, selection, row.cwd)
         store.set('engineThreads', { ...store.get('engineThreads'), [`${sessionId}|${route}`]: parsed.raw })
         store.set('mirrors', { ...store.get('mirrors'), [row.id]: { sessionId, route, synced: allTurns(clean).length, checkedAt: row.updatedAt } })
         created.push({ sessionId, title: cleanTitle(stripCatchup(row.title)) })
         continue
       }
-      if (row.updatedAt <= entry.checkedAt && entry.resync !== true) continue
       const key = `${entry.sessionId}|${entry.route}`
-      if (nativeHost?.isActive(key) !== false || ready[entry.sessionId] !== entry.route) continue
-      if (entry.resync === true && !quiet) continue
-      const turns = allTurns(withoutCatchup((await conversationMessages(parsed)).messages))
-      if (entry.resync === true) {
-        store.set('mirrors', { ...store.get('mirrors'), [row.id]: { sessionId: entry.sessionId, route: entry.route, synced: turns.length, checkedAt: row.updatedAt } })
-        continue
-      }
-      // While the chat changes, its last turn can be unfinished. A turn with a later message after it is complete.
-      const complete = quiet ? turns : turns.slice(0, -1)
-      const replay = nextReplay(entry.synced, complete)
-      if (replay === undefined) {
-        if (quiet) store.set('mirrors', { ...store.get('mirrors'), [row.id]: { ...entry, synced: turns.length, checkedAt: row.updatedAt } })
-        continue
-      }
-      nativeHost.armReplay(key, { user: replay.user, assistant: replay.assistant })
-      // The time stays old while more turns wait, so that the next call finds them.
-      store.set('mirrors', { ...store.get('mirrors'), [row.id]: { ...entry, synced: replay.synced, ...quiet && replay.synced >= turns.length ? { checkedAt: row.updatedAt } : {} } })
-      replays.push({ sessionId: entry.sessionId, user: replay.user })
-      more = more || replay.synced < complete.length
+      if (nativeHost === undefined || !mirrorNeedsRead(entry, { updatedAt: row.updatedAt, quiet, active: nativeHost.isActive(key), currentRoute: ready[entry.sessionId] })) continue
+      const turns = allTurns(withoutCatchup((await conversationMessages(parsed, true)).messages))
+      const plan = planMirror(entry, turns, quiet, row.updatedAt)
+      if (plan.replay !== undefined) nativeHost.armReplay(key, { user: plan.replay.user, assistant: plan.replay.assistant })
+      if (plan.entry !== undefined) store.set('mirrors', { ...store.get('mirrors'), [row.id]: plan.entry })
+      if (plan.replay !== undefined) replays.push({ sessionId: entry.sessionId, user: plan.replay.user })
+      more = more || plan.more
     }
     return { created, replays, more }
   }
@@ -970,7 +936,7 @@ export function apply(ctx: Context, config: Config): void {
   const readInfo = async (settings: Settings, engine: EngineName, instance: string | undefined, asked: string, fresh: boolean): Promise<InfoWire> => {
     // A project folder that was deleted or moved must not break the lists: fall back to the home directory.
     const cwd = statSync(asked, { throwIfNoEntry: false })?.isDirectory() === true ? asked : homedir()
-    const key = `${engine}:${instance ?? ''}:${cwd}`
+    const key = `${infoCachePrefix(engine, instance)}${cwd}`
     // Only the newest load of a key writes the cache; a forced load or an MCP change supersedes the running one.
     const load = (force: boolean): Promise<InfoWire> => {
       const running = infoLoads.get(key)
@@ -994,8 +960,7 @@ export function apply(ctx: Context, config: Config): void {
     return cached.info
   }
   route(INFO_PATH, async (request, settings) => {
-    const wanted = query(request, 'engine')
-    const engine: EngineName = wanted === 'codex' || wanted === 'pi' ? wanted : 'claude'
+    const engine = infoEngine(query(request, 'engine'))
     const asked = query(request, 'cwd') || homedirOf(settings)
     return json(await readInfo(settings, engine, query(request, 'instance') || undefined, asked, query(request, 'fresh') === '1'))
   }, 'info')
@@ -1003,10 +968,9 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => () => { logins.closeAll() }, 'agent-bridge: sign-in commands')
   /** @param provider - the engine and instance of a request. @returns how to ask that engine about its sign-in, and the key of its attempt. */
   const loginOf = (settings: Settings, wanted: string, instance: string | undefined): { key: string; login: EngineLogin } => {
-    if (wanted !== 'claude' && wanted !== 'codex') throw new HttpError(400, 'this provider has no sign-in command')
-    const item = instance === undefined ? undefined : requireInstance(instance)
-    const executable = item?.binaryPath === undefined ? wanted === 'claude' ? settings.claudeExecutable : settings.codexExecutable : resolveCommand(item.binaryPath)
-    return { key: providerId(wanted, instance), login: engineLogin(wanted, executable, item === undefined ? undefined : expandHome(item.home)) }
+    const target = loginTarget(wanted, instance, { claudeExecutable: settings.claudeExecutable, codexExecutable: settings.codexExecutable, findInstance: requireInstance })
+    if (target === undefined) throw new HttpError(400, 'this provider has no sign-in command')
+    return target
   }
   route(LOGIN_PATH, async (request, settings) => {
     if (request.method === 'POST') {
@@ -1016,13 +980,10 @@ export function apply(ctx: Context, config: Config): void {
         logins.cancel(key)
         return json(await readLoginStatus(login))
       }
-      const prefix = `${body.engine}:${body.instance ?? ''}:`
-      return json({ flow: logins.start(key, login, () => { for (const cached of infoCache.keys()) if (cached.startsWith(prefix)) infoCache.delete(cached) }) } satisfies LoginWire)
+      return json({ flow: logins.start(key, login, () => { dropCachedInfo(infoCache, body.engine, body.instance) }) } satisfies LoginWire)
     }
     const { key, login } = loginOf(settings, query(request, 'engine'), query(request, 'instance') || undefined)
-    const flow = logins.take(key)
-    // The credentials do not change while the command waits for the browser, so a poll starts no more processes.
-    return json({ ...flow?.state === 'running' ? {} : await readLoginStatus(login), ...flow === undefined ? {} : { flow } } satisfies LoginWire)
+    return json(await pollLogin(logins, key, login) satisfies LoginWire)
   }, 'login', 'BOTH')
   route(ABOUT_PATH, async (_request, settings) => json(await readAbout(settings)), 'about')
   route(SEARCH_PATH, async (request, settings) => {

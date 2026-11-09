@@ -85,6 +85,14 @@ class CodexRpc {
       env: { ...process.env, USER: process.env['USER'] ?? name, LOGNAME: process.env['LOGNAME'] ?? name, ...this.launch.env },
     })
     this.child = child
+    // A missing executable gives this event and no exit event.
+    child.on('error', (error) => {
+      for (const waiter of this.pending.values()) waiter.reject(error)
+      this.pending.clear()
+      this.child = undefined
+      this.ready = undefined
+      this.lines.reset()
+    })
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => {
       for (const line of this.lines.push(chunk)) {
@@ -152,6 +160,7 @@ class CodexRpc {
 }
 
 const CLOSING_RETRY_MS = 250
+const ALL_TURNS_PAGE = 100
 const CLOSING_RETRIES = 40
 
 /**
@@ -257,6 +266,8 @@ export class CodexEngine {
   private readonly rpc: CodexRpc
   private readonly hub = new LiveHub()
   private readonly runs = new Map<string, Run>()
+  /** The last finished turn of each thread. */
+  private readonly endedTurns = new Map<string, string>()
   private readonly loaded = new Set<string>()
   private readonly items = new Map<string, Json>()
   private readonly watchers = new Map<string, (event: CodexThreadEvent) => void>()
@@ -347,9 +358,16 @@ export class CodexEngine {
    * @returns the transcript messages in order, and whether older turns were left out.
    */
   async readMessages(threadId: string, turnLimit: number): Promise<{ messages: MessageWire[]; earlierOmitted: boolean }> {
-    const result = await this.rpc.call('thread/turns/list', { threadId, limit: turnLimit, sortDirection: 'desc', itemsView: 'full' })
-    const turns = [...(result['data'] as Json[] | undefined) ?? []].reverse()
-    const nextCursor = result['nextCursor'] as string | null | undefined
+    const newest: Json[] = []
+    let nextCursor: string | null | undefined
+    // A finite limit is one page. No limit reads every page, and a repeated cursor ends the read.
+    for (let cursor: string | undefined; ; cursor = nextCursor ?? undefined) {
+      const result = await this.rpc.call('thread/turns/list', { threadId, limit: Number.isFinite(turnLimit) ? turnLimit : ALL_TURNS_PAGE, sortDirection: 'desc', itemsView: 'full', ...cursor === undefined ? {} : { cursor } })
+      newest.push(...(result['data'] as Json[] | undefined) ?? [])
+      nextCursor = result['nextCursor'] as string | null | undefined
+      if (Number.isFinite(turnLimit) || nextCursor === null || nextCursor === undefined || nextCursor === cursor) break
+    }
+    const turns = [...newest].reverse()
     return { messages: turns.flatMap(turn => (turn['items'] as Json[]).flatMap(toMessages)), earlierOmitted: nextCursor !== null && nextCursor !== undefined }
   }
 
@@ -406,7 +424,9 @@ export class CodexEngine {
       ...options.effort === undefined || options.effort === '' ? {} : { effort: options.effort },
       ...options.speed === undefined ? {} : { serviceTier: options.speed === '' ? null : options.speed },
     })
-    this.ensureRun(threadId).turnId = String(response['turn']['id'])
+    const turnId = String(response['turn']['id'])
+    // The turn can end in the same read as this reply, and then no run must stay open for it.
+    if (this.endedTurns.get(threadId) !== turnId) this.ensureRun(threadId).turnId = turnId
     return threadId
   }
 
@@ -520,6 +540,7 @@ export class CodexEngine {
         const error = status === 'error' ? String(turn['error']?.['message'] ?? run.error ?? 'turn failed') : undefined
         for (const finish of [...run.pending.values()]) finish({ behavior: 'deny' })
         this.hub.emit(threadId, error === undefined ? { kind: 'ended', status } : { kind: 'ended', status, error })
+        this.endedTurns.set(threadId, String(turn['id']))
         this.runs.delete(threadId)
         this.hub.end(threadId)
         this.release(threadId)
@@ -618,6 +639,14 @@ export class CodexEngine {
   }
 
   /**
+   * Stop the shell commands that a thread started. Codex keeps them running after a turn is interrupted.
+   * @param threadId - thread id (no prefix).
+   */
+  async cleanTerminals(threadId: string): Promise<void> {
+    await this.rpc.call('thread/backgroundTerminals/clean', { threadId })
+  }
+
+  /**
    * @param threadId - thread id (no prefix).
    * @param subscriber - event callback.
    * @returns the unsubscribe function.
@@ -652,7 +681,7 @@ export class CodexEngine {
 
   /** Interrupt running turns and stop the app-server (plugin teardown). */
   async closeAll(): Promise<void> {
-    await Promise.all([...this.runs.keys()].map(id => this.interrupt(id)))
+    await Promise.allSettled([...this.runs.keys()].map(id => this.interrupt(id)))
     this.rpc.close()
   }
 }

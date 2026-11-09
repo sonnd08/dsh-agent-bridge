@@ -4,6 +4,7 @@
  * engine's result, so that DSH draws, stores and forks the work like its own.
  * @module dsh-agent-bridge/native-engine
  */
+import type { EngineToolCall } from './engine-access.ts'
 import { explainTurnError } from './login.ts'
 import type { CanUseTool, Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { renderHandoff, handoffNote } from './handoff.ts'
@@ -55,6 +56,8 @@ export interface EngineHostDeps {
   writeHandoff(sessionId: string, text: string): Promise<string>
   /** @param key - session and route of an engine turn that starts from DSH. */
   onRealTurn(key: string): void
+  /** Applies the permission level of the chat to a call that the engine asks to run. */
+  authorize(call: EngineToolCall, exec: ProxyExecution, cwd: string): Promise<boolean>
 }
 
 /** What a Claude Code driver needs from the plugin. */
@@ -129,6 +132,13 @@ class EventQueue {
     resolve(event)
   }
 
+  /** @returns the tool calls at the front of the queue. One engine message can hold several calls. */
+  takeTools(): Extract<RunEvent, { kind: 'tool' }>[] {
+    const tools: Extract<RunEvent, { kind: 'tool' }>[] = []
+    while (this.items[0]?.kind === 'tool') tools.push(this.items.shift() as Extract<RunEvent, { kind: 'tool' }>)
+    return tools
+  }
+
   next(): Promise<RunEvent> {
     const item = this.items.shift()
     return item === undefined ? new Promise((resolve) => { this.waiter = resolve }) : Promise.resolve(item)
@@ -141,11 +151,12 @@ class EngineRun {
   readonly outcomes = new Map<string, ToolOutcome>()
   readonly waiters = new Map<string, (outcome: ToolOutcome) => void>()
   readonly approvals = new Map<string, (allow: boolean) => void>()
-  readonly accepted = new Set<string>()
+  /** The decision of each call that DSH started. It runs only if the engine asks, because an engine does not ask for a safe call. */
+  readonly accepted = new Map<string, () => Promise<boolean>>()
   handle: EngineHandle | undefined
 
-  /** @param key - the session and provider of this run. */
-  constructor(readonly key: string) {}
+  /** @param key - the session and provider of this run. @param cwd - the working folder of the chat. */
+  constructor(readonly key: string, readonly cwd: string) {}
 
   /** @param id - tool call. @param outcome - the engine's result. */
   settle(id: string, outcome: ToolOutcome): void {
@@ -160,9 +171,9 @@ class EngineRun {
     return known === undefined ? new Promise((resolve) => { this.waiters.set(id, resolve) }) : Promise.resolve(known)
   }
 
-  /** @param id - tool call. @returns whether DSH started the call. */
+  /** @param id - tool call. @returns whether the call can run: DSH started it and the permission level allows it. */
   approve(id: string): Promise<boolean> {
-    return this.accepted.has(id) ? Promise.resolve(true) : new Promise((resolve) => { this.approvals.set(id, resolve) })
+    return this.accepted.get(id)?.() ?? new Promise((resolve) => { this.approvals.set(id, resolve) })
   }
 
   /** A call that DSH did not run was refused there, so the engine must not run it. */
@@ -235,12 +246,22 @@ function typedText(message: RequestMessageLike): string {
 
 const isTyped = (message: RequestMessageLike): boolean => message.role === 'user' && (message.source?.kind === 'user' || message.source === undefined)
 
+function parseToolArguments(text: string | undefined): { tool?: string; input?: Record<string, unknown> } {
+  try {
+    return JSON.parse(text ?? '{}') as { tool?: string; input?: Record<string, unknown> }
+  } catch (error) {
+    // A model can write broken arguments, and one old call must not block the chat.
+    if (error instanceof SyntaxError) return {}
+    throw error
+  }
+}
+
 function wireOf(message: RequestMessageLike, index: number): MessageWire | undefined {
   if (message.role !== 'assistant' && !isTyped(message)) return undefined
   const blocks = message.content.flatMap((block): BlockWire[] => {
     if (block.type === 'text' && block.text !== undefined) return [{ type: 'text', text: block.text }]
     if (block.type !== 'tool-call') return []
-    const call = JSON.parse(block.arguments ?? '{}') as { tool?: string; input?: Record<string, unknown> }
+    const call = parseToolArguments(block.arguments)
     return [{ type: 'tool_use', name: block.name === ENGINE_TOOL ? call.tool ?? ENGINE_TOOL : block.name ?? '', input: '', id: block.id ?? '', ...call.input === undefined ? {} : { args: call.input } }]
   })
   return blocks.length === 0 ? undefined : { id: message.id ?? String(index), role: message.role as 'user' | 'assistant', blocks }
@@ -265,7 +286,7 @@ export function turnInput(messages: readonly RequestMessageLike[], provider: str
 }
 
 /** The fields of a DSH tool execution that the proxy reads. */
-export interface ProxyExecution { readonly rootCallId: string; readonly signal: AbortSignal }
+export interface ProxyExecution { readonly rootCallId: string; readonly signal: AbortSignal; readonly callId?: string; readonly agent?: { readonly session: unknown } }
 
 /**
  * Create a Claude Code driver.
@@ -342,7 +363,7 @@ export function createEngineHost(deps: EngineHostDeps): {
       const handoff = renderHandoff('previous model' as EngineName, unseen, false)
       prompt = composeSwitchPrompt(text, handoffNote('previous model' as EngineName, await deps.writeHandoff(sessionId, handoff.text), handoff, unseen.length))
     }
-    const run = new EngineRun(key)
+    const run = new EngineRun(key, deps.cwdOf(sessionId))
     run.handle = await driver.begin({
       ...thread === undefined ? {} : { thread },
       cwd: deps.cwdOf(sessionId),
@@ -439,7 +460,7 @@ export function createEngineHost(deps: EngineHostDeps): {
           case 'tool':
             tools.push(event)
             // The SDK can report the call after the message end, so a finished step closes on the call.
-            if (stepEnded) { yield* flushTools(); return }
+            if (stepEnded) { tools.push(...run.queue.takeTools()); yield* flushTools(); return }
             break
           case 'step-end':
             if (tools.length > 0) { yield* flushTools(); return }
@@ -461,13 +482,14 @@ export function createEngineHost(deps: EngineHostDeps): {
     }
   }
 
-  const executeProxy = async (_args: unknown, exec: ProxyExecution): Promise<{ output: string; is_error: boolean }> => {
+  const executeProxy = async (args: unknown, exec: ProxyExecution): Promise<{ output: string; is_error: boolean }> => {
     const run = toolRuns.get(exec.rootCallId)
     toolRuns.delete(exec.rootCallId)
     if (run === undefined) return { output: 'This tool only records calls that another engine already made. Do not call it.', is_error: true }
-    run.accepted.add(exec.rootCallId)
+    const authorize = (): Promise<boolean> => deps.authorize(args as EngineToolCall, exec, run.cwd).catch(() => false)
+    run.accepted.set(exec.rootCallId, authorize)
     const decide = run.approvals.get(exec.rootCallId)
-    if (decide !== undefined) { run.approvals.delete(exec.rootCallId); decide(true) }
+    if (decide !== undefined) { run.approvals.delete(exec.rootCallId); void authorize().then(decide) }
     // The model stream has ended while a tool runs, so the Stop button reaches the engine only through this call.
     const stopped = new Promise<ToolOutcome>((resolve) => {
       const onAbort = (): void => { stopRun(run); resolve({ text: 'The user stopped this tool call.', isError: true }) }

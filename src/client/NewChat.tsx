@@ -5,7 +5,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { orderAccessPresets } from './access-order.ts'
 import { LoginBar } from './LoginBar.tsx'
-import { visibleEngineModels, visibleRows, type EngineModelRow } from './model-names.ts'
+import { engineRailModels, visibleEngineModels, visibleRows, type EngineModelRow } from './model-names.ts'
 import { publishDshCatalog } from './dsh-catalog-store.ts'
 import { useProviders } from './providers-store.ts'
 import { useModelPrefs } from './model-prefs-store.ts'
@@ -147,7 +147,7 @@ export function ProviderSeat({ locked, services, useProjection, t }: { locked?: 
     const models = state.groups.find(group => group.id === routeOf(provider.id))?.models ?? []
     return {
       engine: provider.id, label: provider.label, status: loading, ...provider.accent === undefined ? {} : { accent: provider.accent },
-      models: models.map(model => ({ id: model.id, name: model.name, description: provider.label, efforts: model.reasoning?.efforts ?? [] })),
+      models: engineRailModels(provider.id, provider.label, models, prefs),
     }
   })
   const groups: readonly PickerGroup[] = [dshGroup, ...engineGroups]
@@ -177,6 +177,8 @@ export function ProviderSeat({ locked, services, useProjection, t }: { locked?: 
       selectModel({ provider: group.id, model: model.id, ...level === undefined ? {} : { reasoningEffort: level } })
       return
     }
+    // A custom model is not in the catalog, and the engine decides if it exists.
+    if (route !== undefined) selectModel({ provider: route, model: modelId })
   }
 
   const native = nativePermission()

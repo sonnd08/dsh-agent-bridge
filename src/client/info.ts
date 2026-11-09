@@ -17,8 +17,8 @@ export async function loadInfo(provider: string, cwd: string, fresh = false): Pr
   const instance = providerInstance(provider)
   const request = fetch(`${INFO_PATH}?${new URLSearchParams({ engine: providerEngine(provider), cwd, ...instance === undefined ? {} : { instance }, ...fresh ? { fresh: '1' } : {} }).toString()}`, { credentials: 'same-origin' })
     .then(async (response) => {
-      const body = await response.json() as InfoWire & { error?: string }
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      const body = await response.json().catch((): null => null) as (InfoWire & { error?: string }) | null
+      if (!response.ok || body === null) throw new Error(body?.error ?? `HTTP ${response.status}`)
       cache.set(key, body)
       latest.set(provider, body)
       return body
@@ -34,7 +34,7 @@ export function useInfo(engine: string, cwd: string | undefined): {
 } {
   // Kept with the engine and folder it was loaded for, so another session never shows this one's models.
   const [info, setInfo] = useState<{ key: string; value: InfoWire } | undefined>(undefined)
-  const [error, setError] = useState<string | undefined>(undefined)
+  const [error, setError] = useState<{ key: string; text: string } | undefined>(undefined)
   const [version, setVersion] = useState(0)
   const key = `${engine}:${cwd ?? ''}`
   useEffect(() => {
@@ -42,11 +42,11 @@ export function useInfo(engine: string, cwd: string | undefined): {
     let cancelled = false
     void loadInfo(engine, cwd, version > 0).then(
       (value) => { if (!cancelled) { setInfo({ key: `${engine}:${cwd}`, value }); setError(undefined) } },
-      (reason: unknown) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)) },
+      (reason: unknown) => { if (!cancelled) setError({ key: `${engine}:${cwd}`, text: reason instanceof Error ? reason.message : String(reason) }) },
     )
     return () => { cancelled = true }
   }, [engine, cwd, version])
-  return { info: info?.key === key ? info.value : latest.get(engine), error, reload: useCallback(() => { setVersion(n => n + 1) }, []) }
+  return { info: info?.key === key ? info.value : latest.get(engine), error: error?.key === key ? error.text : undefined, reload: useCallback(() => { setVersion(n => n + 1) }, []) }
 }
 
 /** One provider's entry of {@link useInfos}. */
@@ -75,6 +75,6 @@ export function useInfos(providers: readonly string[], cwd: string | undefined):
   }, [list, cwd])
   return Object.fromEntries(providers.map((provider) => {
     const entry = loaded[provider]
-    return [provider, { info: entry?.key === `${provider}:${cwd ?? ''}` && entry.info !== undefined ? entry.info : latest.get(provider), error: entry?.error }]
+    return [provider, { info: entry?.key === `${provider}:${cwd ?? ''}` && entry.info !== undefined ? entry.info : latest.get(provider), error: entry?.key === `${provider}:${cwd ?? ''}` ? entry.error : undefined }]
   }))
 }

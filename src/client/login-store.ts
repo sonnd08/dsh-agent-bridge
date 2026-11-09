@@ -12,6 +12,8 @@ const listeners = new Set<() => void>()
 const readAt = new Map<string, number>()
 const loading = new Map<string, Promise<void>>()
 const pollers = new Set<string>()
+const doneTimers = new Map<string, number>()
+const attempts = new Map<string, number>()
 
 const subscribe = (listener: () => void): (() => void) => {
   listeners.add(listener)
@@ -32,16 +34,21 @@ function apply(provider: string, body: LoginWire): void {
   const signedIn = body.signedIn ?? previous?.signedIn
   const plan = body.plan ?? previous?.plan
   put(provider, { ...signedIn === undefined ? {} : { signedIn }, ...plan === undefined ? {} : { plan }, ...flow === undefined ? {} : { flow } })
-  if (body.flow?.state === 'running' && !pollers.has(provider)) {
-    pollers.add(provider)
-    window.setTimeout(() => { pollers.delete(provider); void refreshLogin(provider, true) }, POLL_MS)
-  }
+  if (body.flow?.state === 'running') schedulePoll(provider)
   if (body.flow?.state === 'succeeded') {
-    window.setTimeout(() => {
+    window.clearTimeout(doneTimers.get(provider))
+    doneTimers.set(provider, window.setTimeout(() => {
+      doneTimers.delete(provider)
       const { flow: shown, ...rest } = logins[provider] ?? {}
       if (shown?.state === 'succeeded') put(provider, rest)
-    }, DONE_VISIBLE_MS)
+    }, DONE_VISIBLE_MS))
   }
+}
+
+function schedulePoll(provider: string): void {
+  if (pollers.has(provider)) return
+  pollers.add(provider)
+  window.setTimeout(() => { pollers.delete(provider); void refreshLogin(provider, true) }, POLL_MS)
 }
 
 /**
@@ -55,10 +62,17 @@ export async function refreshLogin(provider: string, force = false): Promise<voi
   if (running !== undefined) return await running
   if (!force && Date.now() - (readAt.get(provider) ?? 0) < MIN_AGE_MS) return
   readAt.set(provider, Date.now())
+  const attempt = attempts.get(provider) ?? 0
   const instance = providerInstance(provider)
   const request = fetch(`${LOGIN_PATH}?${new URLSearchParams({ engine: providerEngine(provider), ...instance === undefined ? {} : { instance } }).toString()}`, { credentials: 'same-origin' })
-    .then(async (response) => { if (response.ok) apply(provider, await response.json() as LoginWire) })
-    .catch((error: unknown) => { console.warn('agent-bridge: sign-in state failed', error) })
+    .then(async (response) => {
+      // An answer that started before Sign in does not know about the attempt.
+      if (response.ok && (attempts.get(provider) ?? 0) === attempt) apply(provider, await response.json() as LoginWire)
+    })
+    .catch((error: unknown) => {
+      console.warn('agent-bridge: sign-in state failed', error)
+      if (logins[provider]?.flow?.state === 'running') schedulePoll(provider)
+    })
     .finally(() => { loading.delete(provider) })
   loading.set(provider, request)
   await request
@@ -69,9 +83,9 @@ async function post(provider: string, action: LoginBodyWire['action']): Promise<
   const body: LoginBodyWire = { engine: providerEngine(provider), action, ...instance === undefined ? {} : { instance } }
   try {
     const response = await fetch(LOGIN_PATH, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-    const answer = await response.json() as LoginWire & { error?: string }
-    if (response.ok) apply(provider, answer)
-    else apply(provider, { flow: { state: 'failed', error: answer.error ?? `HTTP ${String(response.status)}` } })
+    const answer = await response.json().catch((): null => null) as (LoginWire & { error?: string }) | null
+    if (response.ok && answer !== null) apply(provider, answer)
+    else apply(provider, { flow: { state: 'failed', error: answer?.error ?? `HTTP ${String(response.status)}` } })
   } catch (error) {
     apply(provider, { flow: { state: 'failed', error: error instanceof Error ? error.message : String(error) } })
   }
@@ -79,6 +93,7 @@ async function post(provider: string, action: LoginBodyWire['action']): Promise<
 
 /** @param provider - provider id. Remove the result of an earlier attempt and run the sign-in command. */
 export async function startLogin(provider: string): Promise<void> {
+  attempts.set(provider, (attempts.get(provider) ?? 0) + 1)
   const { flow: _earlier, ...rest } = logins[provider] ?? {}
   put(provider, { ...rest, flow: { state: 'running' } })
   await post(provider, 'start')

@@ -23,6 +23,7 @@ import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
 import { createSessionsStore, type SessionRow } from './sessions.ts'
 import { ExternalPanel } from './ExternalPanel.tsx'
+import { servicesPerDirectory } from './seat-services.ts'
 import { connectRowMarks, EngineMark, EXTERNAL_MENU_KIND, EXTERNAL_PREFIX, graftWorkspaceBrowser, type ExternalMenuTarget, type GraftSlots } from './graft.tsx'
 import { createModeStore, withMode } from './mode.tsx'
 import { SessionsPage } from './SessionsPage.tsx'
@@ -432,32 +433,21 @@ export function apply(ctx: ClientContext): void {
   ctx.inject(['sessions', 'modelDirectories', 'conversation', 'remote', 'remote.session'] as never, (seatCtx: ClientContext) => {
     const { modelDirectories, sessions } = seatCtx as unknown as SeatContext
     seatCtx.effect(() => connectRowMarks(sessions.list), 'agent-bridge: row marks follow the selected model')
-    const known = new Map<string, SeatServices>()
-    const servicesFor = (sessionId: string): { services: SeatServices } => {
-      const existing = known.get(sessionId)
-      if (existing !== undefined) return { services: existing }
-      let directory: ReturnType<SeatContext['modelDirectories']['directoryFor']> | undefined
-      try {
-        directory = modelDirectories.directoryFor(sessionId)
-      } catch (error) {
-        console.warn('agent-bridge: model directory is not ready', error)
-      }
-      const services: SeatServices = {
-        ...directory === undefined ? {} : { catalog: directory.store },
-        loadCatalog: () => { directory?.load().catch((error: unknown) => { console.warn('agent-bridge: model catalog failed', error) }) },
-        selectModel: (selection) => { directory?.select(selection).catch((error: unknown) => { console.warn('agent-bridge: model selection failed', error) }) },
-        openSettings: canOpenSettings() ? openSettings : undefined,
-        nativePermission: () => {
-          const entry = seatSlots.entries('conversation.input.permission').find(item => item.component !== HiddenPermission && item.inject !== undefined)
-          const injected = entry?.inject?.(sessionId) as { hooks?: { permissionCatalog?: NativePermission['catalog'] }; select?: NativePermission['select'] } | undefined
-          return injected?.hooks?.permissionCatalog === undefined || injected.select === undefined ? undefined : { catalog: injected.hooks.permissionCatalog, select: injected.select }
-        },
-        codexEnabled: () => codexEnabled,
-        subscribeBridge: listener => store.subscribe(listener),
-      }
-      if (directory !== undefined) known.set(sessionId, services)
-      return { services }
-    }
+    type SeatDirectory = ReturnType<SeatContext['modelDirectories']['directoryFor']>
+    const seatServicesFor = servicesPerDirectory<SeatDirectory, SeatServices>(id => modelDirectories.directoryFor(id), (sessionId, directory) => ({
+      ...directory === undefined ? {} : { catalog: directory.store },
+      loadCatalog: () => { directory?.load().catch((error: unknown) => { console.warn('agent-bridge: model catalog failed', error) }) },
+      selectModel: (selection) => { directory?.select(selection).catch((error: unknown) => { console.warn('agent-bridge: model selection failed', error) }) },
+      openSettings: canOpenSettings() ? openSettings : undefined,
+      nativePermission: () => {
+        const entry = seatSlots.entries('conversation.input.permission').find(item => item.component !== HiddenPermission && item.inject !== undefined)
+        const injected = entry?.inject?.(sessionId) as { hooks?: { permissionCatalog?: NativePermission['catalog'] }; select?: NativePermission['select'] } | undefined
+        return injected?.hooks?.permissionCatalog === undefined || injected.select === undefined ? undefined : { catalog: injected.hooks.permissionCatalog, select: injected.select }
+      },
+      codexEnabled: () => codexEnabled,
+      subscribeBridge: listener => store.subscribe(listener),
+    }))
+    const servicesFor = (sessionId: string): { services: SeatServices } => ({ services: seatServicesFor(sessionId) })
     seatCtx.effect(() => {
       const { remote } = seatCtx as unknown as SeatContext
       nativeBranchTargets = () => Object.entries(sessions.list.getSnapshot().byId).flatMap(([key, session]) => session?.cwd === undefined || session.blank === true ? [] : [{ key, cwd: session.cwd }])

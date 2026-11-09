@@ -38,6 +38,7 @@ The build needs a DSH source checkout. This repository must be 3 folder levels b
 | Type check | `pnpm run typecheck` |
 | Build | `pnpm run build` |
 | Unit test (one file) | `node --import tsx/esm --test tests/graft.test.mjs` |
+| Unit test of a React component | Follow `tests/permission-picker.test.mjs`. It imports `tests/support/dom.mjs` first. |
 | Install the working copy | `dsh plugin --profile desktop add link:$PWD` |
 | Install from GitHub | `dsh plugin --profile desktop add github:sonnd08/dsh-agent-bridge` |
 
@@ -46,6 +47,11 @@ The end-to-end tests are `tests/e2e*.mjs`. They need a running `dsh web` instanc
 ## Rules for changes
 
 - `lib/` is committed, and an install from GitHub does no build. Rebuild `lib/` before you commit source changes.
+- Each new feature and each bug fix must have good unit tests in `tests/`, in the same commit as the change.
+  - Test the behavior that the user gets, not the implementation. Include the failure paths and the edge cases.
+  - Put logic that can be tested in a module with no UI, so that a unit test can import it.
+  - For a bug fix, add a test that fails without the fix.
+  - A test in the running app does not replace a unit test.
 - If a change adds UI text, add the text to both the `zh` and `en` dictionaries in `src/client/locales.ts`.
 - If a change is visible to users, update both `README.md` and `README.zh.md`.
 - Bump `version` in `package.json` in each pull request to `main`. Use a minor bump for a new feature and a patch bump for a fix.

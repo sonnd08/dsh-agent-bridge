@@ -4,6 +4,7 @@
  */
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { resolveCommand } from './commands.ts'
 import { DEFAULT_PROVIDER_IDS, type ProviderInstanceWire } from './protocol.ts'
 
 const ID = /^[A-Za-z0-9_-]{1,40}$/
@@ -71,4 +72,21 @@ export function claudeExtraArgs(text: string | undefined): Record<string, string
     }
   }
   return args
+}
+
+/**
+ * @param item - an added Codex instance.
+ * @param defaultExecutable - the command used when the instance names none.
+ * @returns how to start its app-server, in its own home folder.
+ */
+export function codexLaunchOf(item: ProviderInstanceWire, defaultExecutable: string): { readonly executable: string; readonly launch: { readonly env: Readonly<Record<string, string>>; readonly args: readonly string[] } } {
+  return { executable: item.binaryPath === undefined ? defaultExecutable : resolveCommand(item.binaryPath), launch: { env: { CODEX_HOME: expandHome(item.home) }, args: splitLaunchArgs(item.launchArgs) } }
+}
+
+/**
+ * @param item - an added Claude instance.
+ * @returns what a turn of that instance adds to the turn options.
+ */
+export function claudeExtrasOf(item: ProviderInstanceWire): { readonly configDir: string; readonly extraArgs: Record<string, string | null>; readonly executable?: string } {
+  return { configDir: expandHome(item.home), extraArgs: claudeExtraArgs(item.launchArgs), ...item.binaryPath === undefined ? {} : { executable: resolveCommand(item.binaryPath) } }
 }

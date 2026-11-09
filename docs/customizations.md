@@ -29,6 +29,15 @@ Copy this template to the top of the **Log** section.
 
 Put the newest entry first.
 
+### 2026-11-09: Permission levels apply to Claude Code and Codex, and a full test pass
+
+- **What:** Read Only and Workspace Write now apply to tool calls of Claude Code and Codex. A call that the engine asks about shows the native DSH approval card, and Reject stops it. Full access runs with no question, and Auto sends the call to the reviewer. A plain read of a handoff file does not ask. Stop on a Codex command now also stops the shell process. The model label updates after a chat opens again. The rails of Claude Code and Codex follow the hidden, order and custom model settings. New unit tests cover the selector, the settings page, the client stores and the host decisions, and they render the real React components.
+- **Why:** A test in Read Only showed that Claude Code created a file with no question. A full test pass found the other faults.
+- **Other fixes:** a refused provider removal shows its reason; the suggested instance id is free when Codex is off; an error answer no longer breaks the preferences or the provider list; a missing Codex executable no longer crashes the host; a Codex turn that ends at once does not stay running; several tool calls after a step end stay in one step; new turns of a long Codex chat are imported; an old tool call with broken arguments no longer blocks a chat; an empty chat does not use an import slot.
+- **Files:** `src/engine-access.ts`, `src/native-engine.ts`, `src/native-codex.ts`, `src/codex.ts`, `src/mirror.ts`, `src/engine-id.ts`, `src/login.ts`, `src/instances.ts`, `src/index.ts`, `src/client/seat-services.ts`, `src/client/index.ts`, `src/client/NewChat.tsx`, `src/client/model-names.ts`, `src/client/ModelsSection.tsx`, `src/client/graft.tsx`, `src/client/info.ts`, `src/client/login-store.ts`, `src/client/model-prefs-store.ts`, `src/client/providers-store.ts`, `AGENTS.md`, `tests/`
+- **Upstream merge risk:** Medium. Upstream changes to `src/codex.ts`, `src/index.ts` or the settings UI can conflict.
+- **Verified:** The unit tests pass. In the running app: model switch and label, Codex handoff, Claude Allow, Codex Reject, the Read Only approval card, sign-in, settings pages and chat import. Stop on Codex was tested against real Codex directly, not through the app UI. New chat, Fork, Auto, a Workspace Write file change and a real pointer hover were not tested in the app.
+
 ### 2026-11-09: One-click sign-in and a stable permission popup
 
 - **What:** If the selected Claude Code or Codex provider is not signed in, a notice appears above the message box, and on the provider's settings page. **Sign in** runs `claude auth login` or `codex login`, and the engine opens the browser. The notice shows the state of the attempt. A turn that fails because of a missing sign-in now tells the user what to do. The permission popup keeps one height for all levels, and its order is now Read Only, Workspace Write, Auto, Full access.

@@ -8,6 +8,15 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 
 ## What's new
 
+### 0.5.1
+
+- Read Only and Workspace Write now apply to Claude Code and Codex. If a tool call needs permission, the normal approval card appears, and Reject stops the call.
+- Stop on a Codex command now also stops the shell process.
+- The model label now shows the correct model after you change the provider and open the chat again.
+- The Claude Code and Codex rails now follow your hidden models, model order and custom models.
+- New turns of a long Codex chat are now imported, and a missing Codex executable no longer stops the plugin.
+- If Settings cannot remove a provider, it now shows the reason.
+
 ### 0.5.0
 
 <img src="docs/images/whats-new-0.5.0.png" alt="The Permissions popup with four levels, and a notice above the message box that says Claude Code is not signed in, with a Sign in button." width="520">
