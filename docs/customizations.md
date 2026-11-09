@@ -29,6 +29,14 @@ Copy this template to the top of the **Log** section.
 
 Put the newest entry first.
 
+### 2026-11-09: Claude images and tool steps in DSH chats
+
+- **What:** Thumbnails of tool images show on the right of the folded turn header in a DSH chat, and on the folded tool group in the session panel. Codex tool results now give their text and images, and viewed or generated image files show. A Markdown image with a local path shows in the session panel. Imported chats and turns from outside DSH now keep attached images and tool steps. Each step shows in a DSH row with the real tool name, and images from tools show in the row. Live Claude Code turns store tool images. An image attached in the DSH message box now reaches Claude Code or Codex. The local path note after an image is removed. A new import keeps the newest 100 images and the newest 300,000 characters of tool data.
+- **Why:** A DSH chat showed `[image]` and only the final text of a turn.
+- **Files:** `src/dsh-import.ts`, `src/import-images.ts`, `src/native-engine.ts`, `src/native-codex.ts`, `src/claude.ts`, `src/mirror.ts`, `src/protocol.ts`, `src/index.ts`, `src/client/EngineToolRow.tsx`, `src/client/engine-tool-item.ts`, `src/client/replay-prompt.ts`, `src/client/ToolCard.tsx`, `src/client/timeline.ts`, `src/client/ExternalPanel.tsx`, `src/client/index.ts`, `tests/import-steps.test.mjs`, `tests/import-images.test.mjs`, `tests/engine-images.test.mjs`, `tests/engine-tool-row.test.mjs`, `src/codex-images.ts`, `src/client/EngineTurnImages.tsx`, `src/client/engine-turn-images.ts`, `src/client/ThumbStrip.tsx`, `tests/codex-images.test.mjs`, `tests/turn-thumbnails.test.mjs`
+- **Upstream merge risk:** Medium. Upstream changes to the DSH tool slots, to the session event format or to the `data-turn-process` attribute can conflict.
+- **Verified:** The unit tests pass. In the running app: a new Claude import and an outside turn with images and steps, thumbnails on the folded row, and the final image of a Codex chat. A real Codex thread read with the new parser gives the tool image. The session panel image, a live Codex tool image and a new import of a Codex chat with tool images have unit tests only.
+
 ### 2026-11-09: Permission levels apply to Claude Code and Codex, and a full test pass
 
 - **What:** Read Only and Workspace Write now apply to tool calls of Claude Code and Codex. A call that the engine asks about shows the native DSH approval card, and Reject stops it. Full access runs with no question, and Auto sends the call to the reviewer. A plain read of a handoff file does not ask. Stop on a Codex command now also stops the shell process. The model label updates after a chat opens again. The rails of Claude Code and Codex follow the hidden, order and custom model settings. New unit tests cover the selector, the settings page, the client stores and the host decisions, and they render the real React components.

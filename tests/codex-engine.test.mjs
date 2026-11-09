@@ -471,7 +471,7 @@ test('codex transcript: each kind of item becomes messages in order', async () =
   await withEngine({ 'thread/turns/list': [{ result: { data: [{ items }], nextCursor: null } }] }, async (engine) => {
     const page = await engine.readMessages('T', 5)
     assert.equal(page.earlierOmitted, false)
-    assert.deepEqual(page.messages.map(message => message.id), ['u', 'r', 'c:use', 'c:result', 'f:use', 'f:result', 'm', 'p', 'a'])
+    assert.deepEqual(page.messages.map(message => message.id), ['u', 'r', 'c:use', 'c:result', 'f:use', 'f:result', 'm:use', 'm:result', 'p', 'a'])
     assert.equal(page.messages[0].blocks[0].text, 'hi\n[image]')
     assert.equal(page.messages[3].blocks[0].isError, true)
     assert.deepEqual(page.messages[2].blocks[0].args, { command: 'ls', cwd: '/x' })

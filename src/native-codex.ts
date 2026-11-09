@@ -2,6 +2,7 @@
  * Connects Codex to the DSH provider adapter. Codex runs its own tools; each tool item is recorded through the proxy.
  * @module dsh-agent-bridge/native-codex
  */
+import { dynamicToolResult, mcpToolResult, type CodexToolResult } from './codex-images.ts'
 import { capped, type CodexEngine, type CodexThreadEvent, type Json } from './codex.ts'
 import type { EngineDriver, EngineHandle, EngineModel, EngineSink, EngineTurn, ToolOutcome } from './native-engine.ts'
 
@@ -26,6 +27,10 @@ function toolView(item: Json): ToolView | undefined {
   }
 }
 
+function outcomeOf(result: CodexToolResult): ToolOutcome {
+  return { text: capped(result.text), isError: result.isError, ...result.images.length === 0 ? {} : { images: result.images } }
+}
+
 function toolOutcome(item: Json): ToolOutcome {
   switch (item['type']) {
     case 'commandExecution': {
@@ -36,6 +41,8 @@ function toolOutcome(item: Json): ToolOutcome {
       text: capped(((item['changes'] as Json[] | undefined) ?? []).map(change => `${String(change['path'])}\n${String(change['diff'] ?? '')}`).join('\n')),
       isError: item['status'] !== 'completed',
     }
+    case 'mcpToolCall': return outcomeOf(mcpToolResult(item))
+    case 'dynamicToolCall': return outcomeOf(dynamicToolResult(item))
     default: {
       const text = JSON.stringify(item['result'] ?? item['error'] ?? item)
       return { text: capped(text), isError: item['error'] !== undefined && item['error'] !== null }
@@ -143,13 +150,13 @@ export function codexDriver(deps: CodexDriverDeps): EngineDriver {
     name: 'Codex',
     listModels: () => deps.listModels(),
     oneShot: (prompt, model) => deps.engine().ask(deps.home(), prompt, model),
-    begin: async ({ thread, cwd, prompt, model, effort, sink }: EngineTurn): Promise<EngineHandle> => {
+    begin: async ({ thread, cwd, prompt, images, model, effort, sink }: EngineTurn): Promise<EngineHandle> => {
       const engine = deps.engine()
       const threadId = await engine.prepareThread({ ...thread === undefined ? {} : { threadId: thread }, cwd, model, ...access })
       sink.onThread(threadId)
       const reader = new CodexTurnReader(sink, (requestId, allow) => { engine.answer(threadId, requestId, allow ? { behavior: 'allow' } : { behavior: 'deny' }) })
       const stop = engine.watch(threadId, (event) => { if (reader.read(event)) stop() })
-      await engine.start({ threadId, cwd, text: prompt, model, ...effort === undefined ? {} : { effort }, ...access }).catch((error: unknown) => {
+      await engine.start({ threadId, cwd, text: prompt, ...images === undefined ? {} : { images: images.map(image => image.path) }, model, ...effort === undefined ? {} : { effort }, ...access }).catch((error: unknown) => {
         stop()
         sink.push({ kind: 'done', error: error instanceof Error ? error.message : String(error) })
       })

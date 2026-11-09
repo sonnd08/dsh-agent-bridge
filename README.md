@@ -8,6 +8,16 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 
 ## What's new
 
+### 0.6.0
+
+<img src="docs/images/whats-new-0.6.0.png" alt="A chat with an attached image above the message, and three tool image thumbnails on the right of the folded Completed row." width="520">
+
+- Images from Claude Code and Codex now show in DeepSeek Harness chats. An attached image shows above its message.
+- Tool images show as thumbnails on the right of the folded **Completed** row. Select a thumbnail to see the full image.
+- Imported chats and turns from outside DeepSeek Harness now keep their tool steps. Each step shows the real tool name.
+- An image that you attach in a DeepSeek Harness chat now reaches Claude Code or Codex.
+- Chats imported before this version keep their old turns as they are.
+
 ### 0.5.1
 
 - Read Only and Workspace Write now apply to Claude Code and Codex. If a tool call needs permission, the normal approval card appears, and Reject stops the call.

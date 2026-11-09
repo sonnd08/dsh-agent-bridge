@@ -2,7 +2,7 @@
  * Decides which Claude Code and Codex chats become DSH chats, and which of their turns a DSH chat has not shown yet.
  * @module dsh-agent-bridge/mirror
  */
-import type { ImportTurn } from './dsh-import.ts'
+import type { ImportStep, ImportTurn } from './dsh-import.ts'
 import { routeOf } from './native-routes.ts'
 import { CLAUDE_ID_PREFIX, CODEX_ID_PREFIX, withInstanceId, type EngineName, type ProviderInstanceWire, type UsedModelWire } from './protocol.ts'
 
@@ -25,7 +25,15 @@ export interface MirrorEntry {
 }
 
 /** A turn to show in a DSH chat. */
-export interface MirrorReplay { readonly user: string; readonly assistant: string; readonly synced: number }
+export interface MirrorReplay {
+  readonly user: string
+  readonly assistant: string
+  readonly synced: number
+  /** Images that the user attached, as `data:` URLs. */
+  readonly images?: readonly string[]
+  /** The steps of the reply; absent when the reply used no tool. */
+  readonly steps?: readonly ImportStep[]
+}
 
 /**
  * @param updatedAt - file time of the engine chat.
@@ -45,7 +53,7 @@ export function isQuiet(updatedAt: number, now: number): boolean {
 export function nextReplay(synced: number, turns: readonly ImportTurn[]): MirrorReplay | undefined {
   for (let index = synced; index < turns.length; index += 1) {
     const turn = turns[index] as ImportTurn
-    if (turn.assistant !== '') return { user: turn.user, assistant: turn.assistant, synced: index + 1 }
+    if (turn.assistant !== '') return { user: turn.user, assistant: turn.assistant, synced: index + 1, ...turn.images === undefined ? {} : { images: turn.images }, ...turn.steps === undefined ? {} : { steps: turn.steps } }
   }
   return undefined
 }

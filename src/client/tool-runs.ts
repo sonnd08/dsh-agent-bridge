@@ -75,7 +75,7 @@ function isHidden(item: RunItem): boolean {
 }
 
 function isRunItem(item: TimelineItem): item is RunItem {
-  return item.kind !== 'text'
+  return item.kind !== 'text' && item.kind !== 'image'
 }
 
 function toolsOf(items: readonly RunItem[]): ToolItem[] {

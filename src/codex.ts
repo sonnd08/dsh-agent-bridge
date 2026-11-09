@@ -2,6 +2,8 @@
  * Codex sessions through `codex app-server` (JSON-RPC over stdio, one shared child process). Mirrors the
  * Claude driver: list, transcript, goal, live turns with approvals, interrupt, and session management.
  */
+import { capStrings } from './claude.ts'
+import { dynamicToolResult, fileImageResult, mcpToolResult, userBlocks, type CodexToolResult } from './codex-images.ts'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { userInfo } from 'node:os'
@@ -9,7 +11,7 @@ import { modelLabel } from './defaults.ts'
 import { LineSplitter } from './lines.ts'
 import { LiveHub, type Subscriber } from './live.ts'
 import {
-  CODEX_ID_PREFIX, type BlockWire, type GoalWire, type InfoWire, type MessageWire, type ModelWire, type PermissionWire, type QuestionWire, type SessionRowWire,
+  CODEX_ID_PREFIX, type GoalWire, type InfoWire, type MessageWire, type ModelWire, type PermissionWire, type QuestionWire, type SessionRowWire,
 } from './protocol.ts'
 
 /** Options of one Codex turn. */
@@ -193,11 +195,6 @@ function seconds(value: unknown): number {
   return number < 1e12 ? number * 1000 : number
 }
 
-function textOfContent(content: unknown): string {
-  if (!Array.isArray(content)) return ''
-  return content.map((part: Json) => part['type'] === 'text' ? String(part['text'] ?? '') : `[${String(part['type'])}]`).join('\n')
-}
-
 /** Tool output longer than this is cut, so one noisy command cannot make a session too large to send. */
 const TOOL_OUTPUT_LIMIT = 20_000
 
@@ -207,11 +204,28 @@ const TOOL_OUTPUT_LIMIT = 20_000
  */
 export const capped = (text: string): string => text.length > TOOL_OUTPUT_LIMIT ? `${text.slice(0, TOOL_OUTPUT_LIMIT)}…` : text
 
+/** @returns the messages of one tool call: the call, and its result with text and images. */
+function toolMessages(id: string, name: string, args: unknown, result: CodexToolResult): MessageWire[] {
+  const summary = JSON.stringify(args) ?? ''
+  const capArgs = capStrings(args)
+  return [
+    { id: `${id}:use`, role: 'assistant', blocks: [{
+      type: 'tool_use', name, input: summary.length > 400 ? `${summary.slice(0, 400)}…` : summary, id,
+      ...capArgs !== null && typeof capArgs === 'object' && !Array.isArray(capArgs) ? { args: capArgs as Record<string, unknown> } : {},
+    }] },
+    { id: `${id}:result`, role: 'user', blocks: [{
+      type: 'tool_result', text: capped(result.text), forId: id,
+      ...result.images.length === 0 ? {} : { images: [...result.images] },
+      ...result.isError ? { isError: true } : {},
+    }] },
+  ]
+}
+
 function toMessages(item: Json): MessageWire[] {
   const id = String(item['id'])
   switch (item['type']) {
     case 'userMessage':
-      return [{ id, role: 'user', blocks: [{ type: 'text', text: textOfContent(item['content']) }] }]
+      return [{ id, role: 'user', blocks: userBlocks(item['content']) }]
     case 'agentMessage':
       return [{ id, role: 'assistant', blocks: [{ type: 'text', text: String(item['text'] ?? '') }] }]
     case 'plan':
@@ -243,10 +257,13 @@ function toMessages(item: Json): MessageWire[] {
       ]
     }
     case 'mcpToolCall':
-    case 'dynamicToolCall': {
-      const text = JSON.stringify(item)
-      return [{ id, role: 'assistant', blocks: [{ type: 'tool_use', name: String(item['tool'] ?? item['type']), input: text.length > 400 ? `${text.slice(0, 400)}…` : text, id } as BlockWire] }]
-    }
+      return toolMessages(id, String(item['tool'] ?? item['type']), item['arguments'], mcpToolResult(item))
+    case 'dynamicToolCall':
+      return toolMessages(id, String(item['tool'] ?? item['type']), item['arguments'], dynamicToolResult(item))
+    case 'imageView':
+      return toolMessages(id, 'View image', { path: item['path'] }, fileImageResult(item['path']))
+    case 'imageGeneration':
+      return toolMessages(id, 'Generate image', { prompt: item['revisedPrompt'] ?? '' }, fileImageResult(item['savedPath']))
     default:
       return []
   }

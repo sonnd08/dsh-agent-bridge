@@ -6,6 +6,9 @@ import type { TodoWire } from '../protocol.ts'
 import type { TimelineItem } from './timeline.ts'
 import { activeLine, argOf as arg, runTitle, toolLine, type ToolRun } from './tool-runs.ts'
 import css from './ToolCard.module.css'
+import { localImageUrl } from './engine-turn-images.ts'
+import { ThumbStrip } from './ThumbStrip.tsx'
+import stripCss from './ThumbStrip.module.css'
 
 /** Translator the panel passes down. */
 export type Translate = PropsLocale<'agent-bridge'>['t']
@@ -91,6 +94,9 @@ function diffLabels(t: Translate) {
   }
 }
 
+/** Shows a local image that a Markdown message names by its path. */
+const PATH_IMAGES = { resolve: (value: string) => localImageUrl(document.baseURI, value) }
+
 /**
  * Markdown body of a message.
  * @param props - text, translator, and whether the text is still being written.
@@ -99,7 +105,7 @@ function diffLabels(t: Translate) {
 export function Markdown({ text, t, streaming = false }: { text: string; t: Translate; streaming?: boolean }) {
   return (
     <div className={css.markdown}>
-      <MarkdownText text={text} streaming={streaming} labels={{ code: { copyLabel: t('block.copy'), copiedLabel: t('block.copied') }, footnotes: t('block.footnotes') }} />
+      <MarkdownText text={text} streaming={streaming} pathImages={PATH_IMAGES} labels={{ code: { copyLabel: t('block.copy'), copiedLabel: t('block.copied') }, footnotes: t('block.footnotes') }} />
     </div>
   )
 }
@@ -134,6 +140,25 @@ export function Thinking({ text, t }: { text: string; t: Translate }) {
         <Markdown text={text} t={t} />
       </DisclosureRow>
     </div>
+  )
+}
+
+/**
+ * One image in a message. A click shows the full image.
+ * @param props - the image address and the translator.
+ * @returns the image.
+ */
+export function ChatImage({ src, t }: { src: string; t: Translate }) {
+  const [zoom, setZoom] = useState(false)
+  return (
+    <>
+      <img className={css.thumb} data-testid="ext-image" src={src} alt={t('panel.attachedImage')} onClick={() => { setZoom(true) }} />
+      {zoom && (
+        <div className={css.zoom} data-testid="ext-zoom" role="dialog" onClick={() => { setZoom(false) }}>
+          <img src={src} alt={t('panel.attachedImage')} />
+        </div>
+      )}
+    </>
   )
 }
 
@@ -191,6 +216,7 @@ export function ToolRunRow({ run, t, running, active }: { run: ToolRun; t: Trans
           })}
         </div>
       </DisclosureRow>
+      {!open && <ThumbStrip urls={run.items.flatMap(item => item.kind === 'tool' ? item.result?.images ?? [] : [])} t={t} className={stripCss.onRow} />}
     </div>
   )
 }

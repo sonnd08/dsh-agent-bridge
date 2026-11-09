@@ -17,13 +17,17 @@ import type { ExternalSessionSource } from '@deepseek-ai/dsh-client-ui-workspace
 import type { DshSwitchRequest } from './ExternalPanel.tsx'
 import { composeSwitchPrompt } from '../links.ts'
 import { publishRowIndicators, RowIndicators, type RowIndicator } from './RowIndicators.tsx'
-import { ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, DSH_IMPORT_PATH, MIRROR_PATH, type MirrorSyncWire, SEEN_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, engineOfSession, type DshImportBodyWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
+import { ENGINE_TOOL, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, DSH_IMPORT_PATH, MIRROR_PATH, type MirrorSyncWire, SEEN_PATH, MANAGE_PATH, NEW_CODEX_SESSION_ID, NEW_PI_SESSION_ID, PIN_PATH, engineOfSession, type DshImportBodyWire, type ManageBodyWire, NEW_SESSION_ID, PANEL_ID, SESSIONS_PATH, type SessionRowWire } from '../protocol.ts'
 import { applyEngineMarks } from './branding.tsx'
 import { IconChats } from './icons.tsx'
 import { endedSince, notifyEnded } from './notify.ts'
 import { createSessionsStore, type SessionRow } from './sessions.ts'
 import { ExternalPanel } from './ExternalPanel.tsx'
 import { servicesPerDirectory } from './seat-services.ts'
+import { EngineToolRow } from './EngineToolRow.tsx'
+import { EngineTurnImages } from './EngineTurnImages.tsx'
+import { ENGINE_IMAGES_KEY, engineImagesDefinition } from './engine-turn-images.ts'
+import { sendReplay, type ReplayPart } from './replay-prompt.ts'
 import { connectRowMarks, EngineMark, EXTERNAL_MENU_KIND, EXTERNAL_PREFIX, graftWorkspaceBrowser, type ExternalMenuTarget, type GraftSlots } from './graft.tsx'
 import { createModeStore, withMode } from './mode.tsx'
 import { SessionsPage } from './SessionsPage.tsx'
@@ -38,6 +42,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /** Panel and settings-card copy of the agent-bridge plugin. */
     'agent-bridge': ExternalEnginesKey
   }
+}
+
+/** The DSH services that the turn images use. */
+interface ConversationContext {
+  effect(run: () => () => void, label: string): void
+  readonly uiConversation: {
+    readonly events: { register(definition: unknown): void }
+    imageUrl(sessionId: string, attachment: never): Promise<string>
+    peekImageUrl(sessionId: string, attachment: never): string | undefined
+  }
+  readonly slots: { inject(name: string, build: () => unknown): () => void; register(options: Record<string, unknown>, component: unknown): unknown }
 }
 
 /** Harness services the provider selector reads; optional, so the plugin still loads without them. */
@@ -372,6 +387,22 @@ export function apply(ctx: ClientContext): void {
     if (!current.includes(tool)) await scope.set('allowedTools', [...current, tool])
   }
   let startDshSession: ((request: DshSwitchRequest) => Promise<string | undefined>) | undefined
+  // The DSH conversation service is optional, so the plugin still loads without it.
+  ;(ctx as unknown as { inject(names: readonly string[], apply: (inner: ConversationContext) => void): void }).inject(['uiConversation', 'slots'], (inner) => {
+    inner.uiConversation.events.register(engineImagesDefinition)
+    inner.effect(() => inner.slots.inject('conversation.chat.turnTail', () => inner.slots.register({
+      name: 'conversation.chat.turnTail',
+      id: ENGINE_IMAGES_KEY,
+      order: 5,
+      locale: NS,
+      inject: (sessionId: string) => ({
+        loadImage: Object.assign((attachment: never) => inner.uiConversation.imageUrl(sessionId, attachment), { peek: (attachment: never) => inner.uiConversation.peekImageUrl(sessionId, attachment) }),
+      }),
+    }, EngineTurnImages)), 'agent-bridge: turn images')
+  })
+  // The DSH tool slot is typed in a package that this plugin does not build against.
+  const toolSlots = slots as unknown as { inject(name: string, build: () => unknown): () => void; register(options: Record<string, unknown>, component: unknown): unknown }
+  ctx.effect(() => toolSlots.inject('tool.call.toolview', () => toolSlots.register({ name: 'tool.call.toolview', key: ENGINE_TOOL, locale: NS }, EngineToolRow)), 'agent-bridge: engine tool row')
   ctx.effect(() => slots.inject('main', () => slots.register({
     name: 'main',
     key: PANEL_ID,
@@ -502,8 +533,9 @@ export function apply(ctx: ClientContext): void {
             const renamed = await remote.session.rename({ sessionId, title })
             if (!renamed.ok) console.warn('agent-bridge: imported chat title failed', renamed.error.message)
           }
-          for (const { sessionId, user } of replays) {
-            const sent = await remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: 'queue', content: [{ type: 'text', text: user }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+          for (const { sessionId, user, images } of replays) {
+            const send = (content: readonly ReplayPart[]) => remote.session.prompt({ requestId: crypto.randomUUID(), sessionId, mode: 'queue', content: content as never, clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
+            const sent = await sendReplay(send, user, images)
             if (!sent.ok) console.warn('agent-bridge: a turn from another app was not shown', sent.error.message)
           }
           if (created.length > 0 || replays.length > 0) void refresh()

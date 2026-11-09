@@ -148,10 +148,15 @@ export interface BranchTargetWire {
   readonly branch?: string
 }
 
+/** Name of the tool that records the tool calls of another engine in a DSH chat. */
+export const ENGINE_TOOL = 'engine_tool'
+
 /** One content block of a transcript message. */
 export type BlockWire =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'thinking'; readonly text: string }
+  /** An image that the user attached, as a `data:` URL. */
+  | { readonly type: 'image'; readonly src: string }
   | {
     readonly type: 'tool_use'
     readonly name: string
@@ -421,7 +426,7 @@ export const MIRROR_PATH = '/api/agent-bridge/mirror'
 /** Answer of the mirror route. */
 export interface MirrorSyncWire {
   readonly created: readonly { readonly sessionId: string; readonly title: string }[]
-  readonly replays: readonly { readonly sessionId: string; readonly user: string }[]
+  readonly replays: readonly { readonly sessionId: string; readonly user: string; readonly images?: readonly { readonly mediaType: string; readonly data: string }[] }[]
   /** More chats wait for import. */
   readonly more: boolean
 }
