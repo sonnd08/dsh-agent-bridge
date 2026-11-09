@@ -522,3 +522,7 @@
   cursor: default;
   opacity: 0.5;
 }
+
+.content [data-testid='ext-login-bar'] {
+  margin-bottom: 12px;
+}

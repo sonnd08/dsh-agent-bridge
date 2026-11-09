@@ -3,6 +3,8 @@ import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import {
   PermissionIconAutoReviewRegular, PermissionIconFullAccessRegular, PermissionIconReadOnlyRegular, PermissionIconWorkspaceWriteRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { orderAccessPresets } from './access-order.ts'
+import { LoginBar } from './LoginBar.tsx'
 import { visibleEngineModels, visibleRows, type EngineModelRow } from './model-names.ts'
 import { publishDshCatalog } from './dsh-catalog-store.ts'
 import { useProviders } from './providers-store.ts'
@@ -94,7 +96,7 @@ function nativePresetLabel(option: { readonly value: string; readonly name: stri
 /** @param options - the harness presets. @param t - translate. @returns them as access levels; the presets the bridge also has use its descriptions when the catalog has none. */
 function nativeAccessOptions(options: readonly NativeOption[], t: Translate): PermissionOption[] {
   const known: Readonly<Record<string, string>> = { 'read-only': t('picker.accessReadOnly'), 'workspace-write': t('picker.accessWorkspace'), 'danger-full-access': t('picker.accessFull') }
-  return options.map((option) => {
+  return orderAccessPresets(options).map((option) => {
     const description = option.description ?? known[option.value]
     return { value: option.value, label: nativePresetLabel(option, t), ...description === undefined ? {} : { description }, ...NATIVE_ICONS[option.value] === undefined ? {} : { icon: NATIVE_ICONS[option.value] } }
   })
@@ -191,4 +193,17 @@ export function ProviderSeat({ locked, services, useProjection, t }: { locked?: 
       t={t}
     />
   )
+}
+
+/**
+ * The sign-in notice above the composer. It shows only when the selected model belongs to a provider that is not signed in.
+ * @param props - the plugin services of the session and translate.
+ * @returns the notice, or nothing.
+ */
+export function LoginDock({ services, t }: { services: SeatServices; t: Translate }) {
+  const { catalog } = services
+  const state = useSyncExternalStore(catalog?.subscribe ?? noSubscribe, catalog?.getSnapshot ?? noCatalog)
+  const { providers } = useProviders()
+  const provider = providers.find(entry => routeOf(entry.id) === state.current?.provider)
+  return provider === undefined ? null : <LoginBar provider={provider.id} label={provider.label} t={t} />
 }

@@ -29,6 +29,12 @@ Copy this template to the top of the **Log** section.
 
 Put the newest entry first.
 
+### 2026-11-09: One-click sign-in and a stable permission popup
+
+- **What:** If the selected Claude Code or Codex provider is not signed in, a notice appears above the message box, and on the provider's settings page. **Sign in** runs `claude auth login` or `codex login`, and the engine opens the browser. The notice shows the state of the attempt. A turn that fails because of a missing sign-in now tells the user what to do. The permission popup keeps one height for all levels, and its order is now Read Only, Workspace Write, Auto, Full access.
+- **Why:** The turn failed with only "Please run /login". The popup grew upward, so its buttons moved away from the pointer on hover. T3 Code shows the same sign-in state, but for Claude it only tells the user to run the command.
+- **Files:** `src/login.ts`, `src/protocol.ts`, `src/index.ts`, `src/native-engine.ts`, `src/client/login-store.ts`, `src/client/LoginBar.tsx`, `src/client/LoginBar.module.css`, `src/client/access-order.ts`, `src/client/NewChat.tsx`, `src/client/PermissionPicker.tsx`, `src/client/ProviderPicker.module.css`, `src/client/ModelsSection.tsx`, `src/client/ModelsSection.module.css`, `src/client/index.ts`, `src/client/locales.ts`, `tests/login.test.mjs`
+
 ### 2026-11-09: Updated chats become DSH chats
 
 - **What:** If a Claude Code or Codex chat has a new turn, the bridge imports it as a native DSH chat, and the old panel row goes away. Later turns made outside DSH appear in that DSH chat as they were written, and the engine does not run again. A message sent from the DSH chat continues the same Claude or Codex thread. Chats with no new turn stay as they are.

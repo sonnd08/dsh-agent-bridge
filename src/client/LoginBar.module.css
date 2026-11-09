@@ -1,0 +1,39 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: calc(100% - var(--dsh-composer-side-clearance, 0px) - var(--dsh-composer-side-clearance, 0px));
+  max-width: var(--dsh-composer-card-max-width, none);
+  margin: 0 auto;
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-size: 13px;
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.action,
+.primary {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.primary {
+  border-color: transparent;
+  background: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-bg-layer-1);
+}

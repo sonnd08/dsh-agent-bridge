@@ -1,11 +1,13 @@
 /** The provider list and each provider's models, on the Agent Bridge settings page. */
 import { useMemo, useState } from 'react'
 import { addCustomModel, enginePrefs, isEngineEnabled, moveFavorite, moveModel, normalizeCustomSlug, orderFavorites, removeCustomModel, orderRows, toggleAllHidden, toggleEngine, toggleFavorite, toggleHidden } from '../model-prefs.ts'
-import type { InfoWire, ModelPrefsWire, PrefsEngine } from '../protocol.ts'
+import type { InfoWire, LoginWire, ModelPrefsWire, PrefsEngine } from '../protocol.ts'
 import type { AboutRow } from './about.ts'
 import { AddProviderDialog } from './AddProviderDialog.tsx'
 import { useDshCatalog } from './dsh-catalog-store.ts'
 import { useInfos } from './info.ts'
+import { LoginBar } from './LoginBar.tsx'
+import { useLogins } from './login-store.ts'
 import { useProviders, type ProviderEntry } from './providers-store.ts'
 import { engineCatalog, type EngineModelRow } from './model-names.ts'
 import { useModelPrefs } from './model-prefs-store.ts'
@@ -14,13 +16,14 @@ import css from './ModelsSection.module.css'
 
 const STAR = 'm8 1.3 2.07 4.2 4.63.67-3.35 3.27.79 4.61L8 11.87l-4.14 2.18.79-4.61L1.3 6.17l4.63-.67z'
 
-/** @param info - what the provider offers. @param error - its load error. @param row - its about row, if any. @param t - translate. @returns the status line under a provider's name. */
-function providerStatus(engine: string, info: InfoWire | undefined, error: string | undefined, row: AboutRow | undefined, t: Translate): string {
+/** @param info - what the provider offers. @param error - its load error. @param row - its about row, if any. @param login - its sign-in state, if known. @param t - translate. @returns the status line under a provider's name. */
+function providerStatus(engine: string, info: InfoWire | undefined, error: string | undefined, row: AboutRow | undefined, login: LoginWire | undefined, t: Translate): string {
   if (row?.status === 'missing') return t('about.status.missing')
+  if (login?.signedIn === false) return t('providers.notSignedIn')
   if (error !== undefined) return t('providers.notReady')
-  // Codex reports no account even when it is signed in, so only Claude can say "not signed in".
-  if (engine === 'claude' && info?.account?.loggedIn === false) return t('providers.notSignedIn')
-  const plan = info?.account?.plan
+  // Codex reports no account even when it is signed in, so until the sign-in check answers only Claude can say "not signed in".
+  if (login?.signedIn === undefined && engine === 'claude' && info?.account?.loggedIn === false) return t('providers.notSignedIn')
+  const plan = login?.plan ?? info?.account?.plan
   return plan === undefined ? t('providers.available') : t('providers.authenticated', { plan: plan.charAt(0).toUpperCase() + plan.slice(1) })
 }
 
@@ -53,6 +56,7 @@ export function ProvidersPanel({ t, getDefaultCwd, codexEnabled, rows }: { t: Tr
   const [error, setError] = useState<string | undefined>(undefined)
   const [prefs, save] = useModelPrefs()
   const infos = useInfos(entries.map(entry => entry.id), getDefaultCwd())
+  const logins = useLogins(entries.map(entry => entry.id))
   const info = infos[selected]?.info
   const loadError = infos[selected]?.error
   const settings = enginePrefs(prefs, selected)
@@ -159,7 +163,7 @@ export function ProvidersPanel({ t, getDefaultCwd, codexEnabled, rows }: { t: Tr
                     <span>{entry.label}</span>
                     {about?.version !== undefined && <code className={css.slug}>v{about.version}</code>}
                   </span>
-                  <span className={css.engineStatus}>{providerStatus(entry.engine, infos[entry.id]?.info, infos[entry.id]?.error, about, t)}</span>
+                  <span className={css.engineStatus}>{providerStatus(entry.engine, infos[entry.id]?.info, infos[entry.id]?.error, about, logins[entry.id], t)}</span>
                 </button>
                 <button type="button" role="switch" className={enabled ? css.switchOn : css.switchOff} data-testid={`ext-models-enable-${entry.id}`} aria-checked={enabled} aria-label={entry.label} onClick={() => { save(toggleEngine(prefs, entry.id)) }}><span /></button>
               </div>
@@ -200,6 +204,7 @@ export function ProvidersPanel({ t, getDefaultCwd, codexEnabled, rows }: { t: Tr
             )
             : (
               <>
+          {activeEntry !== undefined && <LoginBar provider={activeEntry.id} label={activeEntry.label} t={t} />}
           {activeEntry?.instance !== undefined && (
                 <div className={css.instanceBar}>
                   <span>{t('providers.loginHint')}</span>

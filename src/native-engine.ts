@@ -4,6 +4,7 @@
  * engine's result, so that DSH draws, stores and forks the work like its own.
  * @module dsh-agent-bridge/native-engine
  */
+import { explainTurnError } from './login.ts'
 import type { CanUseTool, Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { renderHandoff, handoffNote } from './handoff.ts'
 import type { BlockWire, EngineName, MessageWire } from './protocol.ts'
@@ -446,7 +447,7 @@ export function createEngineHost(deps: EngineHostDeps): {
             break
           case 'done':
             active.delete(key)
-            if (event.error !== undefined) throw new Error(event.error)
+            if (event.error !== undefined) throw new Error(explainTurnError(driver.name, event.error))
             yield { type: 'usage', usage }
             yield { type: 'finish', reason: { kind: 'stop' } }
             return

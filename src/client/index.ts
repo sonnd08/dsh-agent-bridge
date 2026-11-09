@@ -30,7 +30,7 @@ import { SettingsCard, type ExternalEnginesSection } from './SettingsCard.tsx'
 import { AboutSection } from './AboutSection.tsx'
 import { en, NS, zh, type ExternalEnginesKey } from './locales.ts'
 import { createTranscriptController, isDraft } from './transcript.ts'
-import { ProviderSeat, type CatalogStore, type NativePermission, type SeatServices } from './NewChat.tsx'
+import { LoginDock, ProviderSeat, type CatalogStore, type NativePermission, type SeatServices } from './NewChat.tsx'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -534,6 +534,9 @@ export function apply(ctx: ClientContext): void {
     seatCtx.effect(() => seatSlots.inject('conversation.input.model', () => seatSlots.register({
       name: 'conversation.input.model', priority: -1, locale: NS, inject: servicesFor,
     }, ProviderSeat)), 'agent-bridge: model seat')
+    seatCtx.effect(() => seatSlots.inject('conversation.input.dock', () => seatSlots.register({
+      name: 'conversation.input.dock', id: 'agent-bridge-login', order: -1, locale: NS, inject: servicesFor,
+    }, LoginDock)), 'agent-bridge: sign-in notice')
     seatCtx.effect(() => seatSlots.inject('conversation.input.permission', () => seatSlots.register({
       name: 'conversation.input.permission', priority: -1,
     }, HiddenPermission)), 'agent-bridge: permission moves to the selector')

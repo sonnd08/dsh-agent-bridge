@@ -8,6 +8,14 @@
 
 ## 更新内容
 
+### 0.5.0
+
+<img src="docs/images/whats-new-0.5.0.png" alt="权限弹窗显示四个级别，消息框上方的提示显示 Claude Code 尚未登录，并带有登录按钮。" width="520">
+
+- 如果 Claude Code 或 Codex 尚未登录，消息框上方会显示提示。点击**登录**，然后在浏览器中完成授权。设置中的提供方页面也有同样的按钮。
+- 因未登录而失败的回合现在会告诉你如何处理。
+- 指针移到权限弹窗的某个级别上时，弹窗高度不再变化。顺序现在是仅可查看、工作区内修改、自动、完全权限。
+
 ### 0.4.0
 
 <img src="docs/images/whats-new-0.4.0.png" alt="对话中的模型选择器，显示 DeepSeek、Codex 和 Claude Code 提供方栏、Claude 模型及其推理等级。" width="520">
