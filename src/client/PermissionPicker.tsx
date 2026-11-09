@@ -164,8 +164,15 @@ export function PermissionPopover({ options, value, onChange, riskValues = RISKY
               >{option.icon ?? option.label.charAt(0)}</button>
             ))}
           </div>
-          <p className={popupCss.accessName}>{detail?.label}</p>
-          {detail?.description !== undefined && <p className={popupCss.accessDescription}>{detail.description}</p>}
+          {/* Every level keeps its place in one grid cell. The popup grows upward, so a height change moves the buttons away from the pointer. */}
+          <div className={popupCss.accessDetail}>
+            {options.map(option => (
+              <div key={option.value} className={option.value === detail?.value ? popupCss.accessDetailShown : popupCss.accessDetailItem} aria-hidden={option.value !== detail?.value} data-testid={option.value === detail?.value ? 'ext-provider-access-detail' : undefined}>
+                <p className={popupCss.accessName}>{option.label}</p>
+                {option.description !== undefined && <p className={popupCss.accessDescription}>{option.description}</p>}
+              </div>
+            ))}
+          </div>
         </div>,
         document.body,
       )}

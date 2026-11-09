@@ -4,6 +4,7 @@
  * and a change feed for the transcript file.
  * @module dsh-agent-bridge
  */
+import { engineLogin, LoginFlows, readLoginStatus, type EngineLogin } from './login.ts'
 import { randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { execFile } from 'node:child_process'
@@ -55,7 +56,7 @@ import {
   gitAction, gitBranches, gitCompare, gitDiff, gitDraftMessage, gitLog, gitRemote, gitShow, gitStatus, HttpError, listDir, readText, TerminalManager, writeText,
 } from './workbench.ts'
 import {
-  ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, MIRROR_PATH, type MirrorSyncWire, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
+  LOGIN_PATH, type LoginBodyWire, type LoginWire, ABOUT_PATH, ANSWER_PATH, ARCHIVE_PATH, BRANCH_STATUS_PATH, type BranchStateWire, type BranchTargetWire, CATCHUP_PATH, SEEN_PATH, DSH_IMPORT_PATH, type DshImportBodyWire, MIRROR_PATH, type MirrorSyncWire, INSTANCES_PATH, instanceOfSession, MODEL_PREFS_PATH, providerId, withInstanceId, type InstanceBodyWire, type ProviderInstanceWire, PIN_PATH, CHOICE_PATH, DRAFT_PATH, GIT_CONFIG_PATH, INFO_PATH, MCP_PATH, SEARCH_PATH, SKILLS_PATH,
   type ChoiceWire, type InfoWire, type McpBodyWire, type SkillBodyWire,
   FS_LIST_PATH, FS_READ_PATH, FS_WRITE_PATH, GIT_ACTION_PATH, GIT_BRANCHES_PATH, GIT_DIFF_PATH, GIT_LOG_PATH, GIT_STATUS_PATH,
   FS_ACTION_PATH, FS_BROWSE_PATH, FS_IMAGE_PATH, type FsActionWire,
@@ -998,6 +999,31 @@ export function apply(ctx: Context, config: Config): void {
     const asked = query(request, 'cwd') || homedirOf(settings)
     return json(await readInfo(settings, engine, query(request, 'instance') || undefined, asked, query(request, 'fresh') === '1'))
   }, 'info')
+  const logins = new LoginFlows()
+  ctx.effect(() => () => { logins.closeAll() }, 'agent-bridge: sign-in commands')
+  /** @param provider - the engine and instance of a request. @returns how to ask that engine about its sign-in, and the key of its attempt. */
+  const loginOf = (settings: Settings, wanted: string, instance: string | undefined): { key: string; login: EngineLogin } => {
+    if (wanted !== 'claude' && wanted !== 'codex') throw new HttpError(400, 'this provider has no sign-in command')
+    const item = instance === undefined ? undefined : requireInstance(instance)
+    const executable = item?.binaryPath === undefined ? wanted === 'claude' ? settings.claudeExecutable : settings.codexExecutable : resolveCommand(item.binaryPath)
+    return { key: providerId(wanted, instance), login: engineLogin(wanted, executable, item === undefined ? undefined : expandHome(item.home)) }
+  }
+  route(LOGIN_PATH, async (request, settings) => {
+    if (request.method === 'POST') {
+      const body = await request.json() as LoginBodyWire
+      const { key, login } = loginOf(settings, body.engine, body.instance)
+      if (body.action === 'cancel') {
+        logins.cancel(key)
+        return json(await readLoginStatus(login))
+      }
+      const prefix = `${body.engine}:${body.instance ?? ''}:`
+      return json({ flow: logins.start(key, login, () => { for (const cached of infoCache.keys()) if (cached.startsWith(prefix)) infoCache.delete(cached) }) } satisfies LoginWire)
+    }
+    const { key, login } = loginOf(settings, query(request, 'engine'), query(request, 'instance') || undefined)
+    const flow = logins.take(key)
+    // The credentials do not change while the command waits for the browser, so a poll starts no more processes.
+    return json({ ...flow?.state === 'running' ? {} : await readLoginStatus(login), ...flow === undefined ? {} : { flow } } satisfies LoginWire)
+  }, 'login', 'BOTH')
   route(ABOUT_PATH, async (_request, settings) => json(await readAbout(settings)), 'about')
   route(SEARCH_PATH, async (request, settings) => {
     const term = query(request, 'q').trim()

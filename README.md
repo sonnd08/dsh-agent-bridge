@@ -8,6 +8,14 @@ Use your **Claude Code** and **Codex** sessions inside **[DeepSeek Harness](http
 
 ## What's new
 
+### 0.5.0
+
+<img src="docs/images/whats-new-0.5.0.png" alt="The Permissions popup with four levels, and a notice above the message box that says Claude Code is not signed in, with a Sign in button." width="520">
+
+- If Claude Code or Codex is not signed in, a notice appears above the message box. Select **Sign in** and finish the authorization in your browser. The provider page in Settings has the same button.
+- A turn that fails because of a missing sign-in now tells you what to do.
+- The Permissions popup no longer changes height when the pointer moves over a level. The order is now Read Only, Workspace Write, Auto, Full access.
+
 ### 0.4.0
 
 <img src="docs/images/whats-new-0.4.0.png" alt="The model selector in a chat, with DeepSeek, Codex and Claude Code rails, the Claude models and their reasoning levels." width="520">

@@ -108,6 +108,19 @@
   color: var(--dsw-alias-label-primary);
 }
 
+.accessDetail {
+  display: grid;
+}
+
+.accessDetailItem {
+  grid-area: 1 / 1;
+  visibility: hidden;
+}
+
+.accessDetailShown {
+  grid-area: 1 / 1;
+}
+
 .accessName {
   margin: 12px 0 2px;
   font-size: 14px;

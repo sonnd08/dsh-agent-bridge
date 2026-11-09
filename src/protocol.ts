@@ -377,6 +377,14 @@ export interface FsImageWire { readonly mime: string; readonly base64: string }
 export interface FsBrowseWire { readonly path: string; readonly parent: string | undefined; readonly dirs: readonly string[] }
 
 export const INFO_PATH = '/api/agent-bridge/info'
+/** GET: the sign-in state of a provider. POST with {@link LoginBodyWire}: start or cancel its sign-in. */
+export const LOGIN_PATH = '/api/agent-bridge/login'
+/** One sign-in attempt. `url` is the page that the engine asks the user to open, when it prints one. */
+export interface LoginFlowWire { readonly state: 'running' | 'succeeded' | 'failed'; readonly url?: string; readonly error?: string }
+/** Response of {@link LOGIN_PATH}. `signedIn` is absent when the engine gives no clear answer. */
+export interface LoginWire { readonly signedIn?: boolean; readonly plan?: string; readonly flow?: LoginFlowWire }
+/** Body of a POST to {@link LOGIN_PATH}. */
+export interface LoginBodyWire { readonly engine: string; readonly instance?: string; readonly action: 'start' | 'cancel' }
 /** GET and POST: the user's model order, hidden models, favorites and custom models. */
 export const MODEL_PREFS_PATH = '/api/agent-bridge/model-prefs'
 /** GET and POST: the added provider instances. */
